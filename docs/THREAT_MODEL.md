@@ -51,6 +51,7 @@ OpaqueDrop is server-blind under a specific, limited trust model. It does not us
 - The submit token begins in a URL fragment, which browsers do not send in HTTP requests. The application moves it to per-tab session storage and removes it from the address bar. API calls use the `Authorization` header.
 - OpaqueDrop does not log request headers or tokens. Operators must also disable sensitive-header logging in reverse proxies.
 - The API sends no CORS permission. It rejects `Sec-Fetch-Site: cross-site` and mismatched `Origin` hosts before capability processing. Non-browser clients normally omit both headers.
+- The small invalid-capability limiter is keyed to the immediate TCP peer and deliberately does not trust forwarded headers. Behind a loopback reverse proxy, clients therefore share the proxy's limiter bucket; operators should apply per-client abuse controls at the proxy.
 
 ## Cryptographic boundaries
 
