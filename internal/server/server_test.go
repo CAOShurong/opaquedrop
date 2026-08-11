@@ -283,6 +283,97 @@ func uploadAll(t *testing.T, f *fixture, upload sealedUpload) model.Receipt {
 	return complete(t, f, upload, http.StatusOK)
 }
 
+func TestCloseRequestStopsSubmissionsAndPreservesCompletedCollection(t *testing.T) {
+	f := newFixture(t, 4, 4<<20)
+	completed := seal(t, f, "CCCCCCCCCCCCCCCCCCCCCC", []byte("completed before closure"), "completed.txt", store.MinChunkSize)
+	receipt := uploadAll(t, f, completed)
+	partial := seal(t, f, "PPPPPPPPPPPPPPPPPPPPPP", bytes.Repeat([]byte("p"), store.MinChunkSize+1), "partial.txt", store.MinChunkSize)
+	begin(t, f, partial, http.StatusCreated)
+	put(t, f, partial, 0, http.StatusNoContent)
+
+	closePath := "/api/v1/collect/" + f.bundle.ID + "/close"
+	response, _ := request(t, f, http.MethodPost, closePath, f.submitToken, nil, nil)
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("submit capability closed request: status = %d", response.StatusCode)
+	}
+	response, _ = request(t, f, http.MethodPost, closePath, f.key.CollectToken, nil, map[string]string{
+		"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site",
+	})
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin close status = %d", response.StatusCode)
+	}
+	response, _ = request(t, f, http.MethodGet, "/r/"+f.bundle.ID, "", nil, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("rejected close changed request state: status = %d", response.StatusCode)
+	}
+
+	response, body := request(t, f, http.MethodPost, closePath, f.key.CollectToken, nil, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("close status = %d: %s", response.StatusCode, body)
+	}
+	var closure model.RequestClosure
+	if err := json.Unmarshal(body, &closure); err != nil {
+		t.Fatal(err)
+	}
+	if closure.RequestID != f.bundle.ID || closure.ClosedAt.IsZero() {
+		t.Fatalf("closure = %+v", closure)
+	}
+	response, body = request(t, f, http.MethodPost, closePath, f.key.CollectToken, nil, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("second close status = %d: %s", response.StatusCode, body)
+	}
+	var second model.RequestClosure
+	if err := json.Unmarshal(body, &second); err != nil || !second.ClosedAt.Equal(closure.ClosedAt) {
+		t.Fatalf("idempotent closure = %+v, %v", second, err)
+	}
+
+	response, _ = request(t, f, http.MethodGet, "/r/"+f.bundle.ID, "", nil, nil)
+	if response.StatusCode != http.StatusGone {
+		t.Fatalf("closed request page status = %d", response.StatusCode)
+	}
+	response, _ = request(t, f, http.MethodGet, "/api/v1/requests/"+f.bundle.ID, f.submitToken, nil, nil)
+	if response.StatusCode != http.StatusGone {
+		t.Fatalf("closed request info status = %d", response.StatusCode)
+	}
+	newUpload := seal(t, f, "NNNNNNNNNNNNNNNNNNNNNN", []byte("new"), "new.txt", store.MinChunkSize)
+	begin(t, f, newUpload, http.StatusGone)
+	put(t, f, partial, 1, http.StatusGone)
+	headPath := fmt.Sprintf("/api/v1/requests/%s/uploads/%s/chunks/0", f.bundle.ID, partial.manifest.UploadID)
+	response, _ = request(t, f, http.MethodHead, headPath, f.submitToken, nil, nil)
+	if response.StatusCode != http.StatusGone {
+		t.Fatalf("closed chunk HEAD status = %d", response.StatusCode)
+	}
+	complete(t, f, partial, http.StatusGone)
+
+	response, body = request(t, f, http.MethodGet, "/api/v1/collect/"+f.bundle.ID+"/uploads", f.key.CollectToken, nil, nil)
+	if response.StatusCode != http.StatusOK || !bytes.Contains(body, []byte(receipt.UploadID)) {
+		t.Fatalf("closed collection list status = %d body = %s", response.StatusCode, body)
+	}
+	manifestPath := fmt.Sprintf("/api/v1/collect/%s/uploads/%s/manifest", f.bundle.ID, completed.manifest.UploadID)
+	response, _ = request(t, f, http.MethodGet, manifestPath, f.key.CollectToken, nil, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("closed manifest status = %d", response.StatusCode)
+	}
+	chunkPath := fmt.Sprintf("/api/v1/collect/%s/uploads/%s/chunks/0", f.bundle.ID, completed.manifest.UploadID)
+	response, _ = request(t, f, http.MethodGet, chunkPath, f.key.CollectToken, nil, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("closed chunk status = %d", response.StatusCode)
+	}
+	ackPath := fmt.Sprintf("/api/v1/collect/%s/uploads/%s/ack", f.bundle.ID, completed.manifest.UploadID)
+	response, _ = request(t, f, http.MethodPost, ackPath, f.key.CollectToken, nil, nil)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("closed acknowledgement status = %d", response.StatusCode)
+	}
+
+	purged, err := store.New(f.root).Purge(false, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(purged.UploadDirs) != 0 {
+		t.Fatalf("closed unexpired request was selected for purge: %+v", purged)
+	}
+}
+
 func TestBeginUploadExactRetryIsIdempotent(t *testing.T) {
 	f := newFixture(t, 1, 1<<20)
 	upload := seal(t, f, "JJJJJJJJJJJJJJJJJJJJJJ", []byte("retry manifest exactly"), "retry.txt", store.MinChunkSize)

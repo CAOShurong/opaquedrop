@@ -117,6 +117,18 @@ Inspection adds no endpoint or wire-format field. The collector first requests t
 
 This proves that the displayed sanitized filename came from metadata authenticated to that manifest. It does not authenticate file chunks or the final ciphertext receipt, which still requires full collection. Inspection never requests chunk endpoints and never sends the acknowledgement POST.
 
+## Request closure
+
+Closure changes request lifecycle state, not the cryptographic format. The recipient sends a single non-redirected `POST /api/v1/collect/{request_id}/close` authorized by the collect capability. The request has no body. A successful or repeated call returns:
+
+```json
+{"schema_version":1,"request_id":"...","closed_at":"2026-08-11T20:00:00Z"}
+```
+
+The first successful close time is stable across retries. The server writes the closure record before moving the active public bundle into `closed-requests`, and all submit mutations check that record while holding the same store lock used by close. A submit operation already holding the lock can finish before close returns; after the successful response, request information, manifest setup, chunk PUT/HEAD, and completion return `410 REQUEST_CLOSED` for a valid submit capability. Invalid capabilities still return 401.
+
+Closure is one-way and does not erase uploads. The authenticated receipt list, completed manifests, completed chunks, and acknowledgement remain available through collect routes. Incomplete uploads remain stored until ordinary stale/expiry cleanup but cannot receive more chunks or become complete.
+
 ## Same-tab transfer replay
 
 Transfer recovery does not change the cryptographic format. A repeated manifest setup must contain the exact same request body and upload ID; the server accepts it only when the existing manifest, server state, and chunks directory match that upload. Different bytes under the same upload ID are a conflict.

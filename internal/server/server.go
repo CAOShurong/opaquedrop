@@ -61,6 +61,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("HEAD /api/v1/requests/{id}/uploads/{upload}/chunks/{index}", s.headChunk)
 	mux.HandleFunc("POST /api/v1/requests/{id}/uploads/{upload}/complete", s.completeUpload)
 	mux.HandleFunc("GET /api/v1/collect/{id}/uploads", s.listUploads)
+	mux.HandleFunc("POST /api/v1/collect/{id}/close", s.closeRequest)
 	mux.HandleFunc("GET /api/v1/collect/{id}/uploads/{upload}/manifest", s.collectManifest)
 	mux.HandleFunc("GET /api/v1/collect/{id}/uploads/{upload}/chunks/{index}", s.collectChunk)
 	mux.HandleFunc("POST /api/v1/collect/{id}/uploads/{upload}/ack", s.acknowledge)
@@ -86,6 +87,15 @@ func (s *Server) landing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requestPage(w http.ResponseWriter, r *http.Request) {
+	closed, err := s.Store.Closed(r.PathValue("id"))
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.internalError(w, err)
+		return
+	}
+	if closed {
+		s.storeError(w, store.ErrClosed)
+		return
+	}
 	if _, err := s.Store.Request(r.PathValue("id")); err != nil {
 		http.NotFound(w, r)
 		return
@@ -210,6 +220,19 @@ func (s *Server) listUploads(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"uploads": receipts})
 }
 
+func (s *Server) closeRequest(w http.ResponseWriter, r *http.Request) {
+	_, ok := s.collectAuth(w, r)
+	if !ok {
+		return
+	}
+	closure, err := s.Store.CloseRequest(r.PathValue("id"))
+	if err != nil {
+		s.storeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, closure)
+}
+
 func (s *Server) collectManifest(w http.ResponseWriter, r *http.Request) {
 	_, ok := s.collectAuth(w, r)
 	if !ok {
@@ -286,6 +309,17 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, kind string) 
 		writeError(w, http.StatusUnauthorized, "INVALID_CAPABILITY", "The capability is missing or invalid.")
 		return model.RequestBundle{}, false
 	}
+	if kind == "submit" {
+		closed, err := s.Store.Closed(bundle.ID)
+		if err != nil {
+			s.storeError(w, err)
+			return model.RequestBundle{}, false
+		}
+		if closed {
+			s.storeError(w, store.ErrClosed)
+			return model.RequestBundle{}, false
+		}
+	}
 	return bundle, true
 }
 
@@ -338,6 +372,8 @@ func (s *Server) storeError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "The requested upload was not found.")
 	case errors.Is(err, store.ErrExpired):
 		writeError(w, http.StatusGone, "REQUEST_EXPIRED", "This request has expired.")
+	case errors.Is(err, store.ErrClosed):
+		writeError(w, http.StatusGone, "REQUEST_CLOSED", "This request is closed to new submissions.")
 	case errors.Is(err, store.ErrQuota):
 		writeError(w, http.StatusRequestEntityTooLarge, "REQUEST_QUOTA_EXCEEDED", "This upload exceeds the request quota.")
 	case errors.Is(err, store.ErrConflict):

@@ -92,6 +92,20 @@ func (c *Client) List(ctx context.Context) ([]model.Receipt, error) {
 	return response.Uploads, nil
 }
 
+// CloseRequest irreversibly stops new submissions while leaving completed
+// ciphertext available to the collect capability.
+func (c *Client) CloseRequest(ctx context.Context) (model.RequestClosure, error) {
+	var closure model.RequestClosure
+	url := c.endpoint("/api/v1/collect/%s/close", c.Key.RequestID)
+	if err := c.jsonRequest(ctx, http.MethodPost, url, nil, &closure); err != nil {
+		return model.RequestClosure{}, err
+	}
+	if closure.SchemaVersion != model.SchemaVersion || closure.RequestID != c.Key.RequestID || closure.ClosedAt.IsZero() {
+		return model.RequestClosure{}, errors.New("server returned an invalid request closure")
+	}
+	return closure, nil
+}
+
 func (c *Client) CollectAll(ctx context.Context, outDir string, acknowledge bool) ([]model.CollectResult, error) {
 	return c.Collect(ctx, outDir, CollectOptions{Acknowledge: acknowledge})
 }

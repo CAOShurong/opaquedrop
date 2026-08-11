@@ -24,6 +24,14 @@ type RequestBundle struct {
 	CollectTokenHash   string    `json:"collect_token_hash"`
 }
 
+// RequestClosure records the recipient's irreversible decision to stop new
+// submissions. Completed ciphertext remains available through collect routes.
+type RequestClosure struct {
+	SchemaVersion int       `json:"schema_version"`
+	RequestID     string    `json:"request_id"`
+	ClosedAt      time.Time `json:"closed_at"`
+}
+
 // KeyFile belongs on a recipient-controlled device. The server does not need it.
 type KeyFile struct {
 	SchemaVersion int       `json:"schema_version"`
