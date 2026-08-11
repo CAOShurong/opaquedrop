@@ -4,6 +4,17 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-12
+
+### Added
+
+- `collect --wait DURATION` to wait in the recipient process for matching completed submissions before listing or collecting them, with a configurable bounded `--poll-interval`.
+- Explicit wait semantics for repeated `--upload ID`: all named uploads must be completed before processing starts; ordinary collection proceeds when the first unacknowledged submission appears.
+
+### Changed
+
+- Waits are limited to 24 hours, polling is limited to intervals from one second through five minutes, read failures keep the existing bounded retry policy, and Ctrl+C cancels both requests and poll delays.
+
 ## [0.8.0] - 2026-08-12
 
 ### Changed
@@ -109,7 +120,8 @@ All notable changes are documented here.
 - Deterministic browser WebCrypto ↔ Go test vector and adversarial corruption/reordering tests.
 - Embedded responsive upload UI and dependency-free release binaries.
 
-[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.5.0...v0.6.0

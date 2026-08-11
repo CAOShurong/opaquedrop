@@ -36,15 +36,26 @@ type Client struct {
 }
 
 type CollectOptions struct {
-	Acknowledge bool
-	UploadIDs   []string
-	FailFast    bool
+	Acknowledge  bool
+	UploadIDs    []string
+	FailFast     bool
+	WaitTimeout  time.Duration
+	PollInterval time.Duration
 }
 
 type InspectOptions struct {
 	UploadIDs           []string
 	IncludeAcknowledged bool
 	FailFast            bool
+	WaitTimeout         time.Duration
+	PollInterval        time.Duration
+}
+
+type WaitOptions struct {
+	UploadIDs           []string
+	IncludeAcknowledged bool
+	Timeout             time.Duration
+	PollInterval        time.Duration
 }
 
 type Inspection struct {
@@ -57,13 +68,19 @@ type Inspection struct {
 }
 
 const (
-	DefaultReadRetries = 3
-	MaxReadRetries     = 10
+	DefaultReadRetries  = 3
+	MaxReadRetries      = 10
+	DefaultPollInterval = 5 * time.Second
+	MinPollInterval     = time.Second
+	MaxPollInterval     = 5 * time.Minute
+	MaxWaitTimeout      = 24 * time.Hour
 
 	maxJSONResponse   = 1 << 20
 	maxListResponse   = 8 << 20
 	maxNameCollisions = 10_000
 )
+
+var ErrWaitTimeout = errors.New("no matching submission completed before wait deadline")
 
 func New(key model.KeyFile) *Client {
 	transport := &http.Transport{
@@ -93,6 +110,84 @@ func (c *Client) List(ctx context.Context) ([]model.Receipt, error) {
 	return response.Uploads, nil
 }
 
+// WaitForReceipts polls the authenticated receipt list until a matching
+// completed submission is available, the bounded deadline expires, or the
+// context is cancelled. Explicit upload IDs must all be present; otherwise
+// the first matching pending receipt is sufficient.
+func (c *Client) WaitForReceipts(ctx context.Context, options WaitOptions) ([]model.Receipt, error) {
+	if options.Timeout < 0 || options.Timeout > MaxWaitTimeout {
+		return nil, fmt.Errorf("wait timeout must be between 0 and %s", MaxWaitTimeout)
+	}
+	for _, uploadID := range options.UploadIDs {
+		if !core.ValidID(uploadID) {
+			return nil, fmt.Errorf("invalid upload ID %q", uploadID)
+		}
+	}
+	if options.Timeout == 0 {
+		return c.List(ctx)
+	}
+	if options.PollInterval < MinPollInterval || options.PollInterval > MaxPollInterval {
+		return nil, fmt.Errorf("poll interval must be between %s and %s", MinPollInterval, MaxPollInterval)
+	}
+	now := c.now
+	if now == nil {
+		now = time.Now
+	}
+	sleep := c.sleep
+	if sleep == nil {
+		sleep = sleepContext
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, options.Timeout)
+	defer cancel()
+	deadline := now().Add(options.Timeout)
+	for {
+		receipts, err := c.List(waitCtx)
+		if err != nil {
+			return nil, waitTerminationError(ctx, waitCtx, options.Timeout, err)
+		}
+		if receiptListReady(receipts, options) {
+			return receipts, nil
+		}
+		remaining := deadline.Sub(now())
+		if remaining <= 0 {
+			return nil, fmt.Errorf("%w after %s", ErrWaitTimeout, options.Timeout)
+		}
+		delay := min(options.PollInterval, remaining)
+		if err := sleep(waitCtx, delay); err != nil {
+			return nil, waitTerminationError(ctx, waitCtx, options.Timeout, err)
+		}
+	}
+}
+
+func waitTerminationError(parent, waitCtx context.Context, timeout time.Duration, fallback error) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w after %s", ErrWaitTimeout, timeout)
+	}
+	return fallback
+}
+
+func receiptListReady(receipts []model.Receipt, options WaitOptions) bool {
+	if len(options.UploadIDs) == 0 {
+		for _, receipt := range receipts {
+			if options.IncludeAcknowledged || !receipt.Acknowledged {
+				return true
+			}
+		}
+		return false
+	}
+	wanted := make(map[string]struct{}, len(options.UploadIDs))
+	for _, uploadID := range options.UploadIDs {
+		wanted[uploadID] = struct{}{}
+	}
+	for _, receipt := range receipts {
+		delete(wanted, receipt.UploadID)
+	}
+	return len(wanted) == 0
+}
+
 // CloseRequest irreversibly stops new submissions while leaving completed
 // ciphertext available to the collect capability.
 func (c *Client) CloseRequest(ctx context.Context) (model.RequestClosure, error) {
@@ -112,7 +207,10 @@ func (c *Client) CollectAll(ctx context.Context, outDir string, acknowledge bool
 }
 
 func (c *Client) Inspect(ctx context.Context, options InspectOptions) ([]Inspection, error) {
-	receipts, err := c.List(ctx)
+	receipts, err := c.WaitForReceipts(ctx, WaitOptions{
+		UploadIDs: options.UploadIDs, IncludeAcknowledged: options.IncludeAcknowledged,
+		Timeout: options.WaitTimeout, PollInterval: options.PollInterval,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +253,9 @@ func (c *Client) Inspect(ctx context.Context, options InspectOptions) ([]Inspect
 }
 
 func (c *Client) Collect(ctx context.Context, outDir string, options CollectOptions) ([]model.CollectResult, error) {
-	receipts, err := c.List(ctx)
+	receipts, err := c.WaitForReceipts(ctx, WaitOptions{
+		UploadIDs: options.UploadIDs, Timeout: options.WaitTimeout, PollInterval: options.PollInterval,
+	})
 	if err != nil {
 		return nil, err
 	}
