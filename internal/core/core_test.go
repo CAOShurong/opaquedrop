@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 func TestRequestBundleContainsNoRawCapabilitiesOrPrivateKey(t *testing.T) {
@@ -38,12 +40,22 @@ func TestSafeFilenameConfinesPathsAndDeviceCharacters(t *testing.T) {
 		"../../secret.txt":   "secret.txt",
 		`..\\..\\secret.txt`: "secret.txt",
 		"CON:<bad>?.txt":     "CON__bad__.txt",
+		"CON":                "_CON",
+		"LPT\u00b9.txt":      "_LPT\u00b9.txt",
 		"  .  ":              "received-file",
 	}
 	for input, want := range cases {
 		if got := SafeFilename(input); got != want {
 			t.Errorf("SafeFilename(%q) = %q, want %q", input, got, want)
 		}
+	}
+	long := strings.Repeat("\U0001f600", 180) + ".txt"
+	got := SafeFilename(long)
+	if !utf8.ValidString(got) || len([]byte(got)) > 240 || len(utf16.Encode([]rune(got))) > 240 {
+		t.Fatalf("SafeFilename did not respect cross-platform component budget: bytes=%d utf16=%d", len([]byte(got)), len(utf16.Encode([]rune(got))))
+	}
+	if !strings.HasSuffix(got, ".txt") {
+		t.Fatalf("SafeFilename lost a short extension: %q", got)
 	}
 }
 

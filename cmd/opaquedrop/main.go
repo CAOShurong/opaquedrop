@@ -220,8 +220,16 @@ func collectCommand(args []string) error {
 	keyPath := flags.String("key", "", "private recipient key file")
 	out := flags.String("out", "received", "output directory")
 	noAck := flags.Bool("no-ack", false, "do not acknowledge successful collection")
+	failFast := flags.Bool("fail-fast", false, "stop after the first failed submission")
+	var uploadIDs repeatedStringFlag
+	flags.Var(&uploadIDs, "upload", "collect only this completed upload ID (repeatable; acknowledged uploads may be re-collected)")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	for _, uploadID := range uploadIDs {
+		if !core.ValidID(uploadID) {
+			return fmt.Errorf("invalid upload ID %q", uploadID)
+		}
 	}
 	if *keyPath == "" {
 		return errors.New("--key is required")
@@ -230,18 +238,18 @@ func collectCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	results, err := collector.New(key).CollectAll(context.Background(), *out, !*noAck)
-	if err != nil {
-		return err
-	}
-	if len(results) == 0 {
+	results, collectErr := collector.New(key).Collect(context.Background(), *out, collector.CollectOptions{
+		Acknowledge: !*noAck,
+		UploadIDs:   uploadIDs,
+		FailFast:    *failFast,
+	})
+	if len(results) == 0 && collectErr == nil {
 		fmt.Println("No unacknowledged submissions.")
-		return nil
 	}
 	for _, result := range results {
 		fmt.Printf("Collected %s\n  path: %s\n  bytes: %d\n  plaintext sha256: %s\n  receipt sha256:   %s\n", result.UploadID, result.Path, result.PlainBytes, result.PlainSHA256, result.ReceiptSHA256)
 	}
-	return nil
+	return collectErr
 }
 
 func doctorCommand(args []string) error {
@@ -372,7 +380,7 @@ Usage:
   opaquedrop request import --data DIR --bundle FILE
   opaquedrop request create --data DIR --base-url URL --label TEXT [options]
   opaquedrop serve --data DIR [--listen 127.0.0.1:8080] [--trusted-proxy IP_OR_CIDR]
-  opaquedrop collect --key FILE --out DIR
+  opaquedrop collect --key FILE --out DIR [--upload ID] [--fail-fast]
   opaquedrop doctor --data DIR
   opaquedrop purge --data DIR [--apply]
   opaquedrop version
