@@ -196,7 +196,9 @@ func (s *Store) BeginUpload(bundle model.RequestBundle, raw []byte) (model.Manif
 	if err := os.MkdirAll(requestUploadDir, 0o700); err != nil {
 		return manifest, err
 	}
-	uploadDir := s.uploadDir(bundle.ID, manifest.UploadID)
+	// Keep the standard-library basename sanitizers at this filesystem boundary.
+	// validateBundle and validateManifest reject altered components before this point.
+	uploadDir := filepath.Join(s.uploadsDir(), filepath.Base(bundle.ID), filepath.Base(manifest.UploadID))
 	if err := os.Mkdir(uploadDir, 0o700); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return manifest, ErrConflict
