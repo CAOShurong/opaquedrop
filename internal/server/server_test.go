@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -47,6 +48,10 @@ type sealedUpload struct {
 }
 
 func newFixture(t *testing.T, maxFiles int, maxBytes int64) *fixture {
+	return newFixtureWithOptions(t, maxFiles, maxBytes)
+}
+
+func newFixtureWithOptions(t *testing.T, maxFiles int, maxBytes int64, options ...server.Option) *fixture {
 	t.Helper()
 	root := t.TempDir()
 	s := store.New(root)
@@ -54,7 +59,7 @@ func newFixture(t *testing.T, maxFiles int, maxBytes int64) *fixture {
 		t.Fatal(err)
 	}
 	logs := &bytes.Buffer{}
-	httpServer := httptest.NewServer(server.New(s, log.New(logs, "", 0)).Handler())
+	httpServer := httptest.NewServer(server.New(s, log.New(logs, "", 0), options...).Handler())
 	t.Cleanup(httpServer.Close)
 	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	bundle, key, err := core.MakeRequest(httpServer.URL, "DEMO — confidential intake", now, now.Add(24*time.Hour), maxFiles, maxBytes, false)
@@ -70,6 +75,46 @@ func newFixture(t *testing.T, maxFiles int, maxBytes int64) *fixture {
 	parsed, _ := url.Parse(key.SubmitURL)
 	values, _ := url.ParseQuery(parsed.Fragment)
 	return &fixture{root: root, bundle: bundle, key: key, submitToken: values.Get("t"), server: httpServer, logs: logs}
+}
+
+func TestTrustedProxySeparatesAuthorizationFailureBuckets(t *testing.T) {
+	t.Run("explicit trust isolates forwarded clients", func(t *testing.T) {
+		f := newFixtureWithOptions(t, 1, 1<<20, server.WithTrustedProxies([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}))
+		path := "/api/v1/requests/" + f.bundle.ID
+		for i := 0; i < 12; i++ {
+			response, _ := request(t, f, http.MethodGet, path, "invalid", nil, map[string]string{"X-Forwarded-For": "198.51.100.10"})
+			if response.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("failure %d status = %d", i+1, response.StatusCode)
+			}
+		}
+		response, _ := request(t, f, http.MethodGet, path, "invalid", nil, map[string]string{"X-Forwarded-For": "198.51.100.10"})
+		if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != "60" {
+			t.Fatalf("limited client status = %d, Retry-After = %q", response.StatusCode, response.Header.Get("Retry-After"))
+		}
+		response, _ = request(t, f, http.MethodGet, path, f.submitToken, nil, map[string]string{"X-Forwarded-For": "198.51.100.11"})
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("independent submit client status = %d", response.StatusCode)
+		}
+		response, _ = request(t, f, http.MethodGet, "/api/v1/collect/"+f.bundle.ID+"/uploads", f.key.CollectToken, nil, map[string]string{"X-Forwarded-For": "198.51.100.12"})
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("independent collect client status = %d", response.StatusCode)
+		}
+	})
+
+	t.Run("default ignores spoofed forwarding addresses", func(t *testing.T) {
+		f := newFixture(t, 1, 1<<20)
+		path := "/api/v1/requests/" + f.bundle.ID
+		for i := 0; i < 12; i++ {
+			response, _ := request(t, f, http.MethodGet, path, "invalid", nil, map[string]string{"X-Forwarded-For": fmt.Sprintf("198.51.100.%d", i+1)})
+			if response.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("failure %d status = %d", i+1, response.StatusCode)
+			}
+		}
+		response, _ := request(t, f, http.MethodGet, path, f.submitToken, nil, map[string]string{"X-Forwarded-For": "203.0.113.9"})
+		if response.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("spoofed forwarding header bypassed peer limiter: status = %d", response.StatusCode)
+		}
+	})
 }
 
 func seal(t *testing.T, f *fixture, uploadID string, plaintext []byte, name string, chunkSize int64) sealedUpload {

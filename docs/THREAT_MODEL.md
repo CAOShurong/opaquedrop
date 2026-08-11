@@ -35,7 +35,7 @@ OpaqueDrop is server-blind under a specific, limited trust model. It does not us
 
 ## Explicitly out of scope
 
-- **Malicious JavaScript delivery.** The same server that stores ciphertext serves the upload application. An administrator who changes `app.js` at upload time can exfiltrate plaintext or keys. A future independently packaged uploader could narrow this risk; v0.1.0 does not.
+- **Malicious JavaScript delivery.** The same server that stores ciphertext serves the upload application. An administrator who changes `app.js` at upload time can exfiltrate plaintext or keys. A future independently packaged uploader could narrow this risk; the current release does not.
 - A compromised uploader or recipient endpoint, browser extension, screen recorder, keylogger, or malware.
 - Traffic-analysis privacy. IP addresses, timing, request labels, declared sizes, chunk counts, and total ciphertext sizes remain observable. Reverse proxies may log more.
 - Availability against a submit-link holder. Quotas bound disk commitment, but the token holder can consume those quotas. `purge` recovers stale incomplete reservations.
@@ -51,7 +51,9 @@ OpaqueDrop is server-blind under a specific, limited trust model. It does not us
 - The submit token begins in a URL fragment, which browsers do not send in HTTP requests. The application moves it to per-tab session storage and removes it from the address bar. API calls use the `Authorization` header.
 - OpaqueDrop does not log request headers or tokens. Operators must also disable sensitive-header logging in reverse proxies.
 - The API sends no CORS permission. It rejects `Sec-Fetch-Site: cross-site` and mismatched `Origin` hosts before capability processing. Non-browser clients normally omit both headers.
-- The small invalid-capability limiter is keyed to the immediate TCP peer and deliberately does not trust forwarded headers. Behind a loopback reverse proxy, clients therefore share the proxy's limiter bucket; operators should apply per-client abuse controls at the proxy.
+- The small invalid-capability limiter uses the immediate TCP peer by default. An operator can explicitly trust exact reverse-proxy IPs or CIDRs; only requests arriving from those peers may supply an `X-Forwarded-For` chain, which is parsed from right to left past other trusted hops. Untrusted peers cannot select their limiter identity by forging that header.
+- A malformed forwarded hop encountered while walking the trusted suffix falls back to the immediate peer; attacker-controlled data farther left cannot override a client address already selected by an appending edge proxy. An overly broad trusted-proxy range can let a directly connected attacker evade the limiter by rotating forged addresses, so public client networks must never be trusted.
+- The limiter keeps at most 4,096 active one-minute buckets and groups excess new identities into a bounded overflow bucket. It is an in-process brake on repeated invalid capabilities, not DDoS protection; it resets on restart and should be complemented by proxy-level limits.
 
 ## Cryptographic boundaries
 

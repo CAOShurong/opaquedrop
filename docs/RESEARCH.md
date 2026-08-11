@@ -33,6 +33,19 @@ OpaqueDrop therefore implements one defensible gap:
 
 > A person with only a browser can submit files through an expiring, quota-limited capability; filenames and bytes are encrypted to a recipient key before upload; the server stores no raw capability or recipient private key; the recipient can collect on another device and verify the exact stored ciphertext.
 
+## Operational follow-up: proxy-aware authorization limits
+
+The first release deliberately ignored forwarded client addresses. That prevented header spoofing, but it also meant every public client behind the recommended loopback reverse proxy shared one invalid-capability bucket. Twelve bad attempts from one client could therefore make correct submit and collect capabilities from everyone behind that proxy receive HTTP 429 for one minute.
+
+This is a documented operational failure pattern, not a hypothetical feature request:
+
+- [Copyparty issue #1492](https://github.com/9001/copyparty/issues/1492) reports bot probes causing a reverse-proxy address to be banned so other users could not connect. Copyparty's maintained reverse-proxy guidance pairs the forwarded header with an explicit trusted source and proxy depth.
+- [Gokapi issue #356](https://github.com/Forceu/Gokapi/issues/356) tracks a reverse-proxy client-IP regression and the subsequent Docker/CIDR trusted-proxy repair. Current Gokapi configuration exposes explicit trusted-proxy ranges.
+- [ntfy's proxy documentation](https://github.com/binwiederhier/ntfy/blob/main/docs/config.md#behind-a-proxy-tls-etc) warns that without proxy-aware visitor identity all users are rate-limited as one, and supports trusted proxy hosts for multi-hop chains.
+- [Nextcloud's reverse-proxy configuration](https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/reverse_proxy_configuration.html) similarly limits forwarded client-IP trust to configured proxies and warns that incorrect headers enable IP spoofing.
+
+OpaqueDrop v0.2.0 adopts that established boundary without adding a dependency: `--trusted-proxy` is opt-in and repeatable, the direct peer must match, `X-Forwarded-For` is walked from the nearest hop toward the client, and malformed chains fall back to the peer. A constant-size limiter table prevents newly distinguished source addresses from causing unbounded retained state. This improves fairness behind a proxy; it does not claim to prevent DDoS or abuse by someone who already holds a valid submit capability.
+
 ## Reuse and protocol choices
 
 The project uses only platform primitives rather than introducing a cryptographic library or custom cipher:
