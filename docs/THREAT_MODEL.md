@@ -76,6 +76,7 @@ The 64-bit nonce prefix does not need to be globally collision-free because ever
 - Browser upload retries reuse the same in-memory key and ciphertext. Exact manifest replay succeeds only against a complete matching server-side upload shape, a stored chunk is accepted only after its digest matches, and different manifest bytes under the same upload ID remain a conflict.
 - Completion validates every expected chunk and length, computes the receipt, writes a temporary marker, syncs it, and atomically renames it to `complete.json`.
 - Collection decrypts one bounded chunk at a time into a private temporary output file, verifies the receipt and total length, checks cancellation, syncs the file, and atomically publishes a no-replace hard link under a sanitized, component-bounded basename.
+- Recipient inspection downloads only the bounded receipt list and selected manifests, authenticates encrypted filename metadata locally, sanitizes and quotes the displayed name, and never downloads chunks, creates an output directory, or acknowledges a submission.
 - Automatic retries apply only to read-only GET operations. An incomplete or temporary-error attempt is fully discarded before decryption or writing, so a successful retry cannot duplicate plaintext; acknowledgement POST is sent once and redirects are not followed.
 - A missing, corrupted, reordered, or header-mismatched upload leaves no completed recipient file.
 - A failed completed upload cannot prevent later healthy submissions in the same request from being collected. Partial success still returns a nonzero CLI exit so automation cannot mistake the batch for wholly successful.
@@ -83,3 +84,5 @@ The 64-bit nonce prefix does not need to be globally collision-free because ever
 ## Residual-risk decisions
 
 Server-side antivirus and preview are intentionally incompatible with the server-blind goal. Retention defaults to keeping ciphertext after acknowledgement until the operator runs expiry cleanup; immediate deletion is opt-in. Same-tab upload retries keep the ephemeral file key only in memory; resumable-across-reload browser keys remain intentionally unsupported because persistence expands the browser secret-storage surface.
+
+Inspection output intentionally reveals filenames to the recipient terminal and any local terminal log. An authenticated filename is sender-provided metadata, not evidence that the eventual file content is safe; chunk authentication and receipt verification happen only during collection.

@@ -40,6 +40,21 @@ type CollectOptions struct {
 	FailFast    bool
 }
 
+type InspectOptions struct {
+	UploadIDs           []string
+	IncludeAcknowledged bool
+	FailFast            bool
+}
+
+type Inspection struct {
+	UploadID         string
+	Name             string
+	PlainBytes       int64
+	CompletedAt      time.Time
+	Acknowledged     bool
+	MetadataVerified bool
+}
+
 const (
 	DefaultReadRetries = 3
 	MaxReadRetries     = 10
@@ -79,6 +94,49 @@ func (c *Client) List(ctx context.Context) ([]model.Receipt, error) {
 
 func (c *Client) CollectAll(ctx context.Context, outDir string, acknowledge bool) ([]model.CollectResult, error) {
 	return c.Collect(ctx, outDir, CollectOptions{Acknowledge: acknowledge})
+}
+
+func (c *Client) Inspect(ctx context.Context, options InspectOptions) ([]Inspection, error) {
+	receipts, err := c.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	receipts, selectionErrors := selectInspectionReceipts(receipts, options)
+	results := make([]Inspection, 0, len(receipts))
+	failures := append([]error(nil), selectionErrors...)
+	if options.FailFast && len(failures) > 0 {
+		return results, errors.Join(failures...)
+	}
+	for _, receipt := range receipts {
+		if receipt.RequestID != c.Key.RequestID || !core.ValidID(receipt.UploadID) {
+			failures = append(failures, errors.New("inspect receipt does not match key file"))
+			if options.FailFast {
+				return results, errors.Join(failures...)
+			}
+			continue
+		}
+		result := Inspection{
+			UploadID: receipt.UploadID, Name: "<unreadable>", PlainBytes: receipt.PlainSize,
+			CompletedAt: receipt.CompletedAt, Acknowledged: receipt.Acknowledged,
+		}
+		_, _, metadata, _, err := c.manifestMetadata(ctx, receipt)
+		if err != nil {
+			if ctx.Err() != nil {
+				failures = append(failures, ctx.Err())
+				return results, errors.Join(failures...)
+			}
+			results = append(results, result)
+			failures = append(failures, fmt.Errorf("inspect upload %s: %w", receipt.UploadID, err))
+			if options.FailFast {
+				return results, errors.Join(failures...)
+			}
+			continue
+		}
+		result.Name = core.SafeFilename(metadata.Name)
+		result.MetadataVerified = true
+		results = append(results, result)
+	}
+	return results, errors.Join(failures...)
 }
 
 func (c *Client) Collect(ctx context.Context, outDir string, options CollectOptions) ([]model.CollectResult, error) {
@@ -152,27 +210,24 @@ func selectReceipts(receipts []model.Receipt, uploadIDs []string) ([]model.Recei
 	return selected, failures
 }
 
+func selectInspectionReceipts(receipts []model.Receipt, options InspectOptions) ([]model.Receipt, []error) {
+	if len(options.UploadIDs) > 0 {
+		return selectReceipts(receipts, options.UploadIDs)
+	}
+	if options.IncludeAcknowledged {
+		return receipts, nil
+	}
+	selected := make([]model.Receipt, 0, len(receipts))
+	for _, receipt := range receipts {
+		if !receipt.Acknowledged {
+			selected = append(selected, receipt)
+		}
+	}
+	return selected, nil
+}
+
 func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir string, acknowledge bool) (model.CollectResult, error) {
-	if receipt.RequestID != c.Key.RequestID || !core.ValidID(receipt.UploadID) {
-		return model.CollectResult{}, errors.New("receipt does not match key file")
-	}
-	manifestURL := c.endpoint("/api/v1/collect/%s/uploads/%s/manifest", c.Key.RequestID, receipt.UploadID)
-	manifestRaw, err := c.bytesRequest(ctx, manifestURL, 64<<10)
-	if err != nil {
-		return model.CollectResult{}, err
-	}
-	var manifest model.Manifest
-	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
-		return model.CollectResult{}, errors.New("server returned an invalid manifest")
-	}
-	if manifest.RequestID != c.Key.RequestID || manifest.UploadID != receipt.UploadID || manifest.ChunkCount != receipt.ChunkCount || manifest.PlainSize != receipt.PlainSize {
-		return model.CollectResult{}, errors.New("manifest and receipt disagree")
-	}
-	opener, err := cryptobox.NewOpener(c.Key, manifest)
-	if err != nil {
-		return model.CollectResult{}, err
-	}
-	metadata, err := opener.Metadata(manifest.EncryptedMetadata)
+	manifest, manifestRaw, metadata, opener, err := c.manifestMetadata(ctx, receipt)
 	if err != nil {
 		return model.CollectResult{}, err
 	}
@@ -257,6 +312,33 @@ func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir s
 		}
 	}
 	return result, nil
+}
+
+func (c *Client) manifestMetadata(ctx context.Context, receipt model.Receipt) (model.Manifest, []byte, model.FileMetadata, *cryptobox.Opener, error) {
+	if receipt.RequestID != c.Key.RequestID || !core.ValidID(receipt.UploadID) {
+		return model.Manifest{}, nil, model.FileMetadata{}, nil, errors.New("receipt does not match key file")
+	}
+	manifestURL := c.endpoint("/api/v1/collect/%s/uploads/%s/manifest", c.Key.RequestID, receipt.UploadID)
+	manifestRaw, err := c.bytesRequest(ctx, manifestURL, 64<<10)
+	if err != nil {
+		return model.Manifest{}, nil, model.FileMetadata{}, nil, err
+	}
+	var manifest model.Manifest
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		return model.Manifest{}, nil, model.FileMetadata{}, nil, errors.New("server returned an invalid manifest")
+	}
+	if manifest.RequestID != c.Key.RequestID || manifest.UploadID != receipt.UploadID || manifest.ChunkCount != receipt.ChunkCount || manifest.PlainSize != receipt.PlainSize {
+		return model.Manifest{}, nil, model.FileMetadata{}, nil, errors.New("manifest and receipt disagree")
+	}
+	opener, err := cryptobox.NewOpener(c.Key, manifest)
+	if err != nil {
+		return model.Manifest{}, nil, model.FileMetadata{}, nil, err
+	}
+	metadata, err := opener.Metadata(manifest.EncryptedMetadata)
+	if err != nil {
+		return model.Manifest{}, nil, model.FileMetadata{}, nil, err
+	}
+	return manifest, manifestRaw, metadata, opener, nil
 }
 
 func (c *Client) bytesRequest(ctx context.Context, url string, limit int64) ([]byte, error) {
