@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-12
+
+### Changed
+
+- Collection now creates, syncs, hard-links, verifies, and removes a small probe in the destination directory after manifest authentication but before downloading ciphertext chunks.
+- Filesystems that cannot provide the required atomic no-replace hard-link publication fail immediately with a focused output-filesystem error and no probe residue, instead of failing after the full file download.
+
 ## [0.7.0] - 2026-08-12
 
 ### Added
@@ -102,7 +109,8 @@ All notable changes are documented here.
 - Deterministic browser WebCrypto ↔ Go test vector and adversarial corruption/reordering tests.
 - Embedded responsive upload UI and dependency-free release binaries.
 
-[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.4.0...v0.5.0

@@ -32,6 +32,7 @@ type Client struct {
 	retryMaxDelay  time.Duration
 	sleep          func(context.Context, time.Duration) error
 	now            func() time.Time
+	link           func(string, string) error
 }
 
 type CollectOptions struct {
@@ -74,7 +75,7 @@ func New(key model.KeyFile) *Client {
 	return &Client{
 		Key: key, HTTP: &http.Client{Transport: transport}, ReadRetries: DefaultReadRetries,
 		retryBaseDelay: 250 * time.Millisecond, retryMaxDelay: 30 * time.Second,
-		sleep: sleepContext, now: time.Now,
+		sleep: sleepContext, now: time.Now, link: os.Link,
 	}
 }
 
@@ -245,7 +246,11 @@ func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir s
 	if err != nil {
 		return model.CollectResult{}, err
 	}
-	if err := prepareOutputDir(outDir); err != nil {
+	link := c.link
+	if link == nil {
+		link = os.Link
+	}
+	if err := prepareOutputDir(outDir, link); err != nil {
 		return model.CollectResult{}, &outputError{Err: err}
 	}
 	temp, err := os.CreateTemp(outDir, ".opaquedrop-*.part")
@@ -311,7 +316,7 @@ func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir s
 	if err := ctx.Err(); err != nil {
 		return model.CollectResult{}, err
 	}
-	destination, err := publishOutput(tempPath, outDir, core.SafeFilename(metadata.Name))
+	destination, err := publishOutput(tempPath, outDir, core.SafeFilename(metadata.Name), link)
 	if err != nil {
 		return model.CollectResult{}, &outputError{Err: err}
 	}
@@ -572,7 +577,7 @@ func (c *Client) endpoint(format string, args ...any) string {
 	return strings.TrimRight(c.Key.ServerURL, "/") + fmt.Sprintf(format, args...)
 }
 
-func prepareOutputDir(path string) error {
+func prepareOutputDir(path string, link func(string, string) error) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}
@@ -584,10 +589,60 @@ func prepareOutputDir(path string) error {
 		return errors.New("output path must be a real directory, not a symlink")
 	}
 	_ = os.Chmod(path, 0o700)
+	return preflightOutputPublication(path, link)
+}
+
+func preflightOutputPublication(dir string, link func(string, string) error) (resultErr error) {
+	if link == nil {
+		link = os.Link
+	}
+	probe, err := os.CreateTemp(dir, ".opaquedrop-publish-probe-*.part")
+	if err != nil {
+		return err
+	}
+	probePath := probe.Name()
+	linkPath := probePath + ".link"
+	defer func() {
+		if err := os.Remove(linkPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove output publication probe link: %w", err))
+		}
+		if err := os.Remove(probePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove output publication probe: %w", err))
+		}
+	}()
+	_ = probe.Chmod(0o600)
+	if _, err := probe.Write([]byte("OpaqueDrop output publication probe\n")); err != nil {
+		_ = probe.Close()
+		return err
+	}
+	if err := probe.Sync(); err != nil {
+		_ = probe.Close()
+		return err
+	}
+	if err := probe.Close(); err != nil {
+		return err
+	}
+	if err := link(probePath, linkPath); err != nil {
+		return fmt.Errorf("output filesystem does not support OpaqueDrop's required atomic no-replace hard-link publish: %w", err)
+	}
+	sourceInfo, err := os.Stat(probePath)
+	if err != nil {
+		return err
+	}
+	linkInfo, err := os.Stat(linkPath)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(sourceInfo, linkInfo) {
+		return errors.New("output filesystem did not preserve hard-link identity for OpaqueDrop's atomic no-replace publish")
+	}
 	return nil
 }
 
-func publishOutput(tempPath, dir, name string) (string, error) {
+func publishOutput(tempPath, dir, name string, link func(string, string) error) (string, error) {
+	if link == nil {
+		link = os.Link
+	}
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
 	for attempt := 1; attempt <= maxNameCollisions; attempt++ {
@@ -596,7 +651,7 @@ func publishOutput(tempPath, dir, name string) (string, error) {
 			candidateName = fmt.Sprintf("%s-%d%s", base, attempt, ext)
 		}
 		candidate := filepath.Join(dir, candidateName)
-		if err := os.Link(tempPath, candidate); err == nil {
+		if err := link(tempPath, candidate); err == nil {
 			_ = os.Remove(tempPath)
 			return candidate, nil
 		} else if errors.Is(err, os.ErrExist) {

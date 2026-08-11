@@ -127,6 +127,8 @@ The displayed name is passed through the same cross-platform sanitizer used for 
 
 The collector publishes a fully verified temporary file with a same-directory hard link. This gives no-replace atomicity even when multiple collectors choose the same decrypted name; existing names receive a bounded numeric suffix and are never overwritten. The destination filesystem must support hard links. Common local NTFS, ext4, APFS, and similar filesystems do; a filesystem or network share that rejects hard links fails closed with no final file and should be replaced by a supported staging directory.
 
+After authenticating the small encrypted manifest but before requesting any ciphertext chunk, the collector creates and syncs a random probe file in the output directory, hard-links it, verifies that both names identify the same file, and removes both names. Failure stops the batch as an output-filesystem error before the large transfer. Passing the probe demonstrates the primitive at that moment; it cannot guarantee that a network share stays available or that later quota, permission, or device errors will not occur. OpaqueDrop does not silently fall back to copy or replacing rename because either would weaken atomic visibility or no-overwrite behavior.
+
 OpaqueDrop does not automatically delete or acknowledge a failed submission. Retaining it preserves evidence and avoids turning a decryption error into destructive server action. Operators can let request expiry remove it or investigate the upload ID before cleanup.
 
 ### Transient read failures
