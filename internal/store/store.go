@@ -148,6 +148,9 @@ func (s *Store) Authenticate(id, token, kind string) (model.RequestBundle, bool)
 }
 
 func (s *Store) Info(bundle model.RequestBundle) (model.RequestInfo, error) {
+	if err := validateBundle(bundle); err != nil {
+		return model.RequestInfo{}, err
+	}
 	files, bytes, err := s.usage(bundle.ID)
 	if err != nil {
 		return model.RequestInfo{}, err
@@ -160,6 +163,9 @@ func (s *Store) Info(bundle model.RequestBundle) (model.RequestInfo, error) {
 }
 
 func (s *Store) BeginUpload(bundle model.RequestBundle, raw []byte) (model.Manifest, error) {
+	if err := validateBundle(bundle); err != nil {
+		return model.Manifest{}, err
+	}
 	if len(raw) == 0 || len(raw) > MaxManifest {
 		return model.Manifest{}, fmt.Errorf("%w: manifest size", ErrInvalid)
 	}
@@ -186,7 +192,7 @@ func (s *Store) BeginUpload(bundle model.RequestBundle, raw []byte) (model.Manif
 	if files >= bundle.MaxFiles || manifest.PlainSize > bundle.MaxBytes-bytes {
 		return manifest, ErrQuota
 	}
-	requestUploadDir := filepath.Join(s.uploadsDir(), bundle.ID)
+	requestUploadDir := filepath.Join(s.uploadsDir(), filepath.Base(bundle.ID))
 	if err := os.MkdirAll(requestUploadDir, 0o700); err != nil {
 		return manifest, err
 	}
@@ -333,7 +339,10 @@ func (s *Store) Complete(requestID, uploadID string) (model.Receipt, error) {
 }
 
 func (s *Store) ListReceipts(requestID string) ([]model.Receipt, error) {
-	dir := filepath.Join(s.uploadsDir(), requestID)
+	if !core.ValidID(requestID) {
+		return nil, ErrInvalid
+	}
+	dir := filepath.Join(s.uploadsDir(), filepath.Base(requestID))
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return []model.Receipt{}, nil
@@ -387,6 +396,9 @@ func (s *Store) OpenChunk(requestID, uploadID string, index int) (*os.File, int6
 }
 
 func (s *Store) Acknowledge(bundle model.RequestBundle, uploadID string) error {
+	if err := validateBundle(bundle); err != nil || !core.ValidID(uploadID) {
+		return ErrInvalid
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, err := s.readReceipt(bundle.ID, uploadID); err != nil {
@@ -444,7 +456,10 @@ func (s *Store) Purge(apply bool, staleIncomplete time.Duration) (PurgeResult, e
 }
 
 func (s *Store) usage(requestID string) (int, int64, error) {
-	dir := filepath.Join(s.uploadsDir(), requestID)
+	if !core.ValidID(requestID) {
+		return 0, 0, ErrInvalid
+	}
+	dir := filepath.Join(s.uploadsDir(), filepath.Base(requestID))
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, 0, nil
@@ -610,11 +625,13 @@ func writeNew(path string, data []byte, perm os.FileMode) error {
 	return os.Chmod(path, perm)
 }
 
-func (s *Store) requestsDir() string          { return filepath.Join(s.Root, "requests") }
-func (s *Store) uploadsDir() string           { return filepath.Join(s.Root, "uploads") }
-func (s *Store) requestPath(id string) string { return filepath.Join(s.requestsDir(), id+".json") }
+func (s *Store) requestsDir() string { return filepath.Join(s.Root, "requests") }
+func (s *Store) uploadsDir() string  { return filepath.Join(s.Root, "uploads") }
+func (s *Store) requestPath(id string) string {
+	return filepath.Join(s.requestsDir(), filepath.Base(id)+".json")
+}
 func (s *Store) uploadDir(requestID, uploadID string) string {
-	return filepath.Join(s.uploadsDir(), requestID, uploadID)
+	return filepath.Join(s.uploadsDir(), filepath.Base(requestID), filepath.Base(uploadID))
 }
 func (s *Store) chunkPath(requestID, uploadID string, index int) string {
 	return filepath.Join(s.uploadDir(requestID, uploadID), "chunks", fmt.Sprintf("%08d.bin", index))
