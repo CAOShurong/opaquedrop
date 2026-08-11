@@ -89,6 +89,8 @@ The server data directory contains:
 ```text
 opaquedrop.json
 requests/<request-id>.json
+closed-requests/<request-id>.json (bundle after recipient closure)
+closed-requests/<request-id>.closure.json
 uploads/<request-id>/<upload-id>/
   manifest.json
   server.json
@@ -98,6 +100,20 @@ uploads/<request-id>/<upload-id>/
 ```
 
 The recipient key file is a separate backup asset and is more sensitive than server data. Back it up through a recipient-controlled encrypted system. A server backup without that key preserves availability of ciphertext but not decryption capability.
+
+Back up `requests`, `closed-requests`, and `uploads` as one state set. Restoring only an old active bundle without its newer closure record can reopen a link; restoring only the closure directory without matching uploads loses availability. Stop the service or use a filesystem snapshot that preserves a consistent point in time.
+
+## Closing an intake early
+
+Expiry is the automatic end of an intake. To stop a mis-shared or already fulfilled link immediately, run from the recipient-controlled device that holds the key file:
+
+```console
+opaquedrop request close --key ./request.key.json
+```
+
+The command is irreversible and safe to repeat: repeated calls return the original close time. It does not delete uploads. Completed submissions remain available through `collect --list` and `collect`; incomplete submissions cannot accept further chunks or complete. A request already being written may finish its current operation before closure obtains the store lock, but no submit mutation is accepted after the close response succeeds.
+
+The state transition creates `closed-requests/<id>.closure.json` and moves the bundle from `requests/<id>.json` to `closed-requests/<id>.json`. Keep both closure state and uploads in backups. Do not downgrade below v0.7.0 after using closure: older binaries cannot collect the moved bundle, and their cleanup logic does not understand this state. OpaqueDrop supports one server/maintenance writer for a data directory; stop `serve` before offline backup, manual state repair, or an old-binary rollback.
 
 ## Collection failures and recovery
 
@@ -154,3 +170,5 @@ The binary does not create a scheduler. If an operator adds a systemd timer, its
 5. Stop the service, replace the binary, and start it.
 
 Protocol and state schemas are versioned. v0.x does not perform an in-place database migration because there is no database. If a future release requires a state transformation, its release notes must provide an explicit backup and rollback path.
+
+Version 0.7.0 adds the `closed-requests` directory during `init`, `serve`, or request import. This is additive until a request is closed. Once closure moves a bundle, rollback to an older binary is not supported for that data directory; restore a pre-close snapshot or continue with v0.7.0 or later.

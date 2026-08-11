@@ -92,7 +92,7 @@ func initCommand(args []string) error {
 
 func requestCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("request requires make, import, or create")
+		return errors.New("request requires make, import, create, or close")
 	}
 	switch args[0] {
 	case "make":
@@ -101,6 +101,8 @@ func requestCommand(args []string) error {
 		return requestMake(args[1:], true)
 	case "import":
 		return requestImport(args[1:])
+	case "close":
+		return requestClose(args[1:])
 	default:
 		return fmt.Errorf("unknown request command %q", args[0])
 	}
@@ -188,6 +190,30 @@ func requestImport(args []string) error {
 		return err
 	}
 	fmt.Printf("Imported request %s into %s\n", bundle.ID, absolute(*data))
+	return nil
+}
+
+func requestClose(args []string) error {
+	flags := flag.NewFlagSet("request close", flag.ContinueOnError)
+	keyPath := flags.String("key", "", "private recipient key file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *keyPath == "" {
+		return errors.New("--key is required")
+	}
+	key, err := loadKey(*keyPath)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	closure, err := collector.New(key).CloseRequest(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Closed request %s at %s.\n", closure.RequestID, closure.ClosedAt.UTC().Format(time.RFC3339))
+	fmt.Println("This cannot be reopened. New submissions are refused; completed submissions remain available to collect, and incomplete submissions cannot continue.")
 	return nil
 }
 
@@ -431,6 +457,7 @@ Usage:
   opaquedrop request make --base-url URL --label TEXT [options]
   opaquedrop request import --data DIR --bundle FILE
   opaquedrop request create --data DIR --base-url URL --label TEXT [options]
+  opaquedrop request close --key FILE
   opaquedrop serve --data DIR [--listen 127.0.0.1:8080] [--trusted-proxy IP_OR_CIDR]
   opaquedrop collect --key FILE --out DIR [--upload ID] [--fail-fast] [--read-retries N]
   opaquedrop collect --key FILE --list [--all] [--upload ID] [--fail-fast] [--read-retries N]

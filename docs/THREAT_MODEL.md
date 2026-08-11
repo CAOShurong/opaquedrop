@@ -20,7 +20,7 @@ OpaqueDrop is server-blind under a specific, limited trust model. It does not us
 
 1. The storage server does not need the recipient private key and receives no plaintext filename or file content.
 2. A submit capability can create bounded uploads but cannot list, download, collect, or acknowledge submissions.
-3. A collect capability can read ciphertext and acknowledge collection but cannot decrypt without the separate private key.
+3. A collect capability can read ciphertext, acknowledge collection, and irreversibly close new submissions, but cannot decrypt without the separate private key.
 4. Corruption, reordering, cross-upload substitution, and manifest-field tampering fail authentication in the collector.
 5. A successful browser receipt identifies the exact manifest bytes and ordered ciphertext chunk hashes stored at completion.
 6. Files are not exposed at their final recipient path until every authenticated chunk and the receipt have been verified.
@@ -51,6 +51,7 @@ OpaqueDrop is server-blind under a specific, limited trust model. It does not us
 - The request bundle stores only SHA-256 token hashes. Verification uses constant-time comparison.
 - The submit token begins in a URL fragment, which browsers do not send in HTTP requests. The application moves it to per-tab session storage and removes it from the address bar. API calls use the `Authorization` header.
 - OpaqueDrop does not log request headers or tokens. Operators must also disable sensitive-header logging in reverse proxies.
+- The collect capability can irreversibly close a request. A successful close blocks valid submit operations with HTTP 410 but does not delete completed or incomplete ciphertext. The CLI requires the full recipient key file, while the server authorizes the operation by its collect capability; this is lifecycle authorization, not proof of operator identity or cryptographic erasure of the submit token.
 - The API sends no CORS permission. It rejects `Sec-Fetch-Site: cross-site` and mismatched `Origin` hosts before capability processing. Non-browser clients normally omit both headers.
 - The small invalid-capability limiter uses the immediate TCP peer by default. An operator can explicitly trust exact reverse-proxy IPs or CIDRs; only requests arriving from those peers may supply an `X-Forwarded-For` chain, which is parsed from right to left past other trusted hops. Untrusted peers cannot select their limiter identity by forging that header.
 - A malformed forwarded hop encountered while walking the trusted suffix falls back to the immediate peer; attacker-controlled data farther left cannot override a client address already selected by an appending edge proxy. An overly broad trusted-proxy range can let a directly connected attacker evade the limiter by rotating forged addresses, so public client networks must never be trusted.
@@ -75,6 +76,7 @@ The 64-bit nonce prefix does not need to be globally collision-free because ever
 - Chunk uploads go to a private temporary file and rename into place only after the exact declared length is received.
 - Browser upload retries reuse the same in-memory key and ciphertext. Exact manifest replay succeeds only against a complete matching server-side upload shape, a stored chunk is accepted only after its digest matches, and different manifest bytes under the same upload ID remain a conflict.
 - Completion validates every expected chunk and length, computes the receipt, writes a temporary marker, syncs it, and atomically renames it to `complete.json`.
+- Closing first writes a durable closure record and then atomically moves the request bundle out of the active directory. Close and submit-side mutations share the store lock, so a successful close response is a barrier after which no setup, chunk, digest, or completion mutation is accepted. Already completed collect paths remain available.
 - Collection decrypts one bounded chunk at a time into a private temporary output file, verifies the receipt and total length, checks cancellation, syncs the file, and atomically publishes a no-replace hard link under a sanitized, component-bounded basename.
 - Recipient inspection downloads only the bounded receipt list and selected manifests, authenticates encrypted filename metadata locally, sanitizes and quotes the displayed name, and never downloads chunks, creates an output directory, or acknowledges a submission.
 - Automatic retries apply only to read-only GET operations. An incomplete or temporary-error attempt is fully discarded before decryption or writing, so a successful retry cannot duplicate plaintext; acknowledgement POST is sent once and redirects are not followed.
@@ -86,3 +88,5 @@ The 64-bit nonce prefix does not need to be globally collision-free because ever
 Server-side antivirus and preview are intentionally incompatible with the server-blind goal. Retention defaults to keeping ciphertext after acknowledgement until the operator runs expiry cleanup; immediate deletion is opt-in. Same-tab upload retries keep the ephemeral file key only in memory; resumable-across-reload browser keys remain intentionally unsupported because persistence expands the browser secret-storage surface.
 
 Inspection output intentionally reveals filenames to the recipient terminal and any local terminal log. An authenticated filename is sender-provided metadata, not evidence that the eventual file content is safe; chunk authentication and receipt verification happen only during collection.
+
+Closure is intentionally one-way because reopening the same leaked submit capability would defeat the operational purpose. It is not deletion, key rotation, identity authentication, or protection against an administrator who changes state or runs an older binary. Backups and rollback must preserve the closure directory together with request and upload state.

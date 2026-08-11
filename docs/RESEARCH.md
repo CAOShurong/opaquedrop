@@ -100,6 +100,19 @@ The implementation adds no runtime dependency, server endpoint, wire/storage ver
 
 Destination hard-link compatibility remains a separate limitation. Windows and cloud file-share documentation shows that support varies by local filesystem and SMB mode, while a correct portable replacement must retain both atomic visibility and no-overwrite behavior across Windows, Linux, macOS, SMB, and NFS. An early capability probe may improve diagnostics later, but this release does not claim NAS compatibility or weaken the current fail-closed publication rule.
 
+## Operational follow-up: close a request before expiry
+
+Before v0.7.0, an upload capability stayed usable until its fixed expiry even when the recipient learned that the link had been shared too broadly or the intended intake had finished early. Quotas limited storage commitment, but there was no recipient workflow to stop later valid submissions without stopping the service or manually editing server state. This is a concrete lifecycle gap; the sources below establish the broader workflow need, not OpaqueDrop adoption or prevalence.
+
+- The [W3C TAG capability URL guidance](https://w3ctag.github.io/capability-urls/) identifies revocation after accidental disclosure as a capability-system requirement and explains why replacing a compromised secret alone is insufficient when a resource must remain available.
+- [Nextcloud's maintained sharing guide](https://docs.nextcloud.com/server/stable/user_manual/en/files/sharing.html) lets an owner unshare a public link or set an expiry, showing the ordinary expectation that a live sharing grant can end before its original lifetime.
+- [Gokapi File Request management](https://gokapi.readthedocs.io/en/latest/usage.html#file-request-menu) lets an administrator remove a request, but that product's deletion workflow also removes associated uploaded files. OpaqueDrop needs a narrower boundary because a recipient may need to stop senders while retaining already completed ciphertext for collection.
+- A [self-hosted temporary-upload workflow](https://www.reddit.com/r/selfhosted/comments/1lfanxj/how_can_i_give_someone_temporary_access_to_my/) explicitly asks to disable access after a large upload is complete. This practitioner report is evidence of the workflow, not its frequency.
+
+OpaqueDrop v0.7.0 adds an idempotent, collect-capability-authorized close operation. It composes the existing key file and authorization boundary rather than adding an account system, revocation database, runtime dependency, or plaintext index. The server records one immutable close time and moves the public bundle out of active state; valid submit calls then receive 410, while completed receipt, manifest, chunk, and acknowledgement routes remain available. No item is silently deleted or merged, and an incomplete upload cannot continue.
+
+This adds lifecycle state and one API endpoint but no cryptographic wire-format change. It does not rotate the submit secret, prove the human operator's identity, delete ciphertext, protect against a hostile administrator, or support reopening. Nextcloud (AGPL-3.0 broad suite) and Gokapi (AGPL-3.0 Go service with database/storage options) offer richer account-side request management when their plaintext/server-side storage boundaries fit; OpaqueDrop retains its narrower zero-runtime-dependency role. Because older releases do not understand moved closed bundles, v0.7.0 documents the storage and rollback boundary instead of claiming downgrade compatibility.
+
 ## Reuse and protocol choices
 
 The project uses only platform primitives rather than introducing a cryptographic library or custom cipher:

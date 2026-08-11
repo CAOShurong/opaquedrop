@@ -69,6 +69,32 @@ func TestPublishOutputNeverReplacesACollision(t *testing.T) {
 	}
 }
 
+func TestCloseRequestDoesNotReplayAcrossRedirect(t *testing.T) {
+	targetRequests := 0
+	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		targetRequests++
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	sourceRequests := 0
+	source := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		sourceRequests++
+		response.Header().Set("Location", target.URL)
+		response.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	client := New(model.KeyFile{RequestID: "RRRRRRRRRRRRRRRRRRRRRR", ServerURL: source.URL, CollectToken: "collect-token"})
+	client.HTTP = source.Client()
+	_, err := client.CloseRequest(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "307") {
+		t.Fatalf("CloseRequest error = %v", err)
+	}
+	if sourceRequests != 1 || targetRequests != 0 {
+		t.Fatalf("close request replayed: source=%d target=%d", sourceRequests, targetRequests)
+	}
+}
+
 func TestReadRetriesTruncatedBodyAndTransientStatus(t *testing.T) {
 	t.Run("truncated body", func(t *testing.T) {
 		attempts := 0

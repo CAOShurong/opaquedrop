@@ -27,6 +27,7 @@ var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
 	ErrExpired  = errors.New("request expired")
+	ErrClosed   = errors.New("request closed")
 	ErrQuota    = errors.New("request quota exceeded")
 	ErrInvalid  = errors.New("invalid input")
 )
@@ -55,7 +56,7 @@ func New(root string) *Store {
 func (s *Store) SetClock(now func() time.Time) { s.now = now }
 
 func (s *Store) Init() error {
-	for _, dir := range []string{s.Root, s.requestsDir(), s.uploadsDir()} {
+	for _, dir := range []string{s.Root, s.requestsDir(), s.closedRequestsDir(), s.uploadsDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
@@ -85,7 +86,7 @@ func (s *Store) Doctor() ([]string, error) {
 		return checks, errors.New("data directory must not be a symbolic link")
 	}
 	checks = append(checks, "data directory is not a symlink")
-	for _, p := range []string{filepath.Join(s.Root, "opaquedrop.json"), s.requestsDir(), s.uploadsDir()} {
+	for _, p := range []string{filepath.Join(s.Root, "opaquedrop.json"), s.requestsDir(), s.closedRequestsDir(), s.uploadsDir()} {
 		if _, err := os.Stat(p); err != nil {
 			return checks, fmt.Errorf("required path %s: %w", p, err)
 		}
@@ -113,10 +114,25 @@ func (s *Store) ImportRequest(bundle model.RequestBundle) error {
 }
 
 func (s *Store) Request(id string) (model.RequestBundle, error) {
+	return s.readRequestPath(id, s.requestPath(id))
+}
+
+// RequestIncludingClosed loads a request for recipient-side collection. New
+// submission paths must use Request or explicitly check Closed while holding
+// the store mutex.
+func (s *Store) RequestIncludingClosed(id string) (model.RequestBundle, error) {
+	bundle, err := s.Request(id)
+	if err == nil || !errors.Is(err, ErrNotFound) {
+		return bundle, err
+	}
+	return s.readRequestPath(id, s.closedRequestPath(id))
+}
+
+func (s *Store) readRequestPath(id, path string) (model.RequestBundle, error) {
 	if !core.ValidID(id) {
 		return model.RequestBundle{}, ErrNotFound
 	}
-	b, err := os.ReadFile(s.requestPath(id))
+	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return model.RequestBundle{}, ErrNotFound
 	}
@@ -130,8 +146,107 @@ func (s *Store) Request(id string) (model.RequestBundle, error) {
 	return bundle, nil
 }
 
+// Closed reports whether a durable closure marker exists. Marker presence is
+// deliberately fail-closed even if later inspection finds malformed content.
+func (s *Store) Closed(id string) (bool, error) {
+	if !core.ValidID(id) {
+		return false, ErrNotFound
+	}
+	_, err := os.Stat(s.closurePath(id))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// CloseRequest irreversibly stops new submit-side mutations. The closure
+// marker is written before the active bundle is moved so a failed rename still
+// leaves new binaries fail-closed and a later call can finish the transition.
+func (s *Store) CloseRequest(id string) (model.RequestClosure, error) {
+	if !core.ValidID(id) {
+		return model.RequestClosure{}, ErrNotFound
+	}
+	if err := s.Init(); err != nil {
+		return model.RequestClosure{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	closure, closureErr := s.readClosure(id)
+	if closureErr != nil && !errors.Is(closureErr, ErrNotFound) {
+		return model.RequestClosure{}, closureErr
+	}
+	activePath := s.requestPath(id)
+	closedPath := s.closedRequestPath(id)
+	_, activeErr := os.Stat(activePath)
+	_, closedErr := os.Stat(closedPath)
+	activeExists := activeErr == nil
+	closedExists := closedErr == nil
+	if activeErr != nil && !errors.Is(activeErr, os.ErrNotExist) {
+		return model.RequestClosure{}, activeErr
+	}
+	if closedErr != nil && !errors.Is(closedErr, os.ErrNotExist) {
+		return model.RequestClosure{}, closedErr
+	}
+	if !activeExists && !closedExists {
+		return model.RequestClosure{}, ErrNotFound
+	}
+	if activeExists && closedExists {
+		return model.RequestClosure{}, ErrConflict
+	}
+
+	if errors.Is(closureErr, ErrNotFound) {
+		closure = model.RequestClosure{SchemaVersion: model.SchemaVersion, RequestID: id, ClosedAt: s.now().UTC()}
+		encoded, err := core.MarshalPretty(closure)
+		if err != nil {
+			return model.RequestClosure{}, err
+		}
+		writeErr := writeNew(s.closurePath(id), encoded, 0o600)
+		if writeErr != nil && !errors.Is(writeErr, os.ErrExist) {
+			return model.RequestClosure{}, writeErr
+		}
+		if errors.Is(writeErr, os.ErrExist) {
+			var err error
+			closure, err = s.readClosure(id)
+			if err != nil {
+				return model.RequestClosure{}, err
+			}
+		}
+	}
+	if activeExists {
+		if err := os.Rename(activePath, closedPath); err != nil {
+			return model.RequestClosure{}, err
+		}
+		if err := os.Chmod(closedPath, 0o600); err != nil {
+			return model.RequestClosure{}, err
+		}
+	}
+	return closure, nil
+}
+
+func (s *Store) readClosure(id string) (model.RequestClosure, error) {
+	b, err := os.ReadFile(s.closurePath(id))
+	if errors.Is(err, os.ErrNotExist) {
+		return model.RequestClosure{}, ErrNotFound
+	}
+	if err != nil {
+		return model.RequestClosure{}, err
+	}
+	var closure model.RequestClosure
+	if err := json.Unmarshal(b, &closure); err != nil {
+		return model.RequestClosure{}, err
+	}
+	if closure.SchemaVersion != model.SchemaVersion || closure.RequestID != id || closure.ClosedAt.IsZero() {
+		return model.RequestClosure{}, fmt.Errorf("%w: closure record", ErrInvalid)
+	}
+	return closure, nil
+}
+
 func (s *Store) Authenticate(id, token, kind string) (model.RequestBundle, bool) {
-	bundle, err := s.Request(id)
+	bundle, err := s.RequestIncludingClosed(id)
 	if err != nil || token == "" {
 		return model.RequestBundle{}, false
 	}
@@ -182,6 +297,11 @@ func (s *Store) BeginUpload(bundle model.RequestBundle, raw []byte) (model.Manif
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if closed, err := s.Closed(bundle.ID); err != nil {
+		return manifest, err
+	} else if closed {
+		return manifest, ErrClosed
+	}
 	if !bundle.ExpiresAt.After(s.now()) {
 		return manifest, ErrExpired
 	}
@@ -303,6 +423,11 @@ func (s *Store) PutChunk(requestID, uploadID string, index int, r io.Reader, con
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if closed, err := s.Closed(requestID); err != nil {
+		return err
+	} else if closed {
+		return ErrClosed
+	}
 	dest := s.chunkPath(requestID, uploadID, index)
 	if _, err := os.Stat(dest); err == nil {
 		return ErrConflict
@@ -337,6 +462,13 @@ func (s *Store) PutChunk(requestID, uploadID string, index int, r io.Reader, con
 }
 
 func (s *Store) ChunkDigest(requestID, uploadID string, index int) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if closed, err := s.Closed(requestID); err != nil {
+		return "", err
+	} else if closed {
+		return "", ErrClosed
+	}
 	manifest, _, err := s.readManifest(requestID, uploadID)
 	if err != nil || index < 0 || index >= manifest.ChunkCount {
 		return "", ErrNotFound
@@ -359,6 +491,11 @@ func (s *Store) ChunkDigest(requestID, uploadID string, index int) (string, erro
 func (s *Store) Complete(requestID, uploadID string) (model.Receipt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if closed, err := s.Closed(requestID); err != nil {
+		return model.Receipt{}, err
+	} else if closed {
+		return model.Receipt{}, ErrClosed
+	}
 	if receipt, err := s.readReceipt(requestID, uploadID); err == nil {
 		return receipt, nil
 	}
@@ -495,7 +632,7 @@ func (s *Store) Purge(apply bool, staleIncomplete time.Duration) (PurgeResult, e
 		if !requestEntry.IsDir() || !core.ValidID(requestEntry.Name()) {
 			continue
 		}
-		bundle, bundleErr := s.Request(requestEntry.Name())
+		bundle, bundleErr := s.RequestIncludingClosed(requestEntry.Name())
 		uploads, _ := os.ReadDir(filepath.Join(s.uploadsDir(), requestEntry.Name()))
 		for _, upload := range uploads {
 			if !upload.IsDir() || !core.ValidID(upload.Name()) {
@@ -690,10 +827,17 @@ func writeNew(path string, data []byte, perm os.FileMode) error {
 	return os.Chmod(path, perm)
 }
 
-func (s *Store) requestsDir() string { return filepath.Join(s.Root, "requests") }
-func (s *Store) uploadsDir() string  { return filepath.Join(s.Root, "uploads") }
+func (s *Store) requestsDir() string       { return filepath.Join(s.Root, "requests") }
+func (s *Store) closedRequestsDir() string { return filepath.Join(s.Root, "closed-requests") }
+func (s *Store) uploadsDir() string        { return filepath.Join(s.Root, "uploads") }
 func (s *Store) requestPath(id string) string {
 	return filepath.Join(s.requestsDir(), filepath.Base(id)+".json")
+}
+func (s *Store) closedRequestPath(id string) string {
+	return filepath.Join(s.closedRequestsDir(), filepath.Base(id)+".json")
+}
+func (s *Store) closurePath(id string) string {
+	return filepath.Join(s.closedRequestsDir(), filepath.Base(id)+".closure.json")
 }
 func (s *Store) uploadDir(requestID, uploadID string) string {
 	return filepath.Join(s.uploadsDir(), filepath.Base(requestID), filepath.Base(uploadID))

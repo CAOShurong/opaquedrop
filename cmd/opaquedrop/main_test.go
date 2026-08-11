@@ -38,6 +38,13 @@ func TestCollectRejectsAllWithoutListBeforeReadingKey(t *testing.T) {
 	}
 }
 
+func TestRequestCloseRequiresKey(t *testing.T) {
+	err := run([]string{"request", "close"})
+	if err == nil || !strings.Contains(err.Error(), "--key is required") {
+		t.Fatalf("request close error = %v", err)
+	}
+}
+
 func TestWriteInspectionsEscapesNamesAndShowsState(t *testing.T) {
 	completed := time.Date(2026, time.August, 11, 12, 34, 56, 0, time.UTC)
 	var output bytes.Buffer

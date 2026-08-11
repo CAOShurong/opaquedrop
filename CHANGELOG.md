@@ -4,6 +4,19 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-12
+
+### Added
+
+- `opaquedrop request close --key FILE` for a recipient-authenticated, irreversible stop to new submissions before the original expiry.
+- An idempotent collect-capability close endpoint and durable closure record; completed submissions remain available for normal inspection, collection, and acknowledgement.
+
+### Changed
+
+- Active request bundles move into a fail-closed `closed-requests` state so a restarted current server cannot reopen the upload page or accept later setup, chunk, digest, or completion operations.
+- Purge resolves both active and closed request bundles, preventing an unexpired closed request from being mistaken for orphaned upload state.
+- Closing and submit-side mutations share the store lock: an operation already in progress may finish before close returns, but no later submit mutation is accepted after the successful close response.
+
 ## [0.6.0] - 2026-08-11
 
 ### Added
@@ -89,7 +102,8 @@ All notable changes are documented here.
 - Deterministic browser WebCrypto ↔ Go test vector and adversarial corruption/reordering tests.
 - Embedded responsive upload UI and dependency-free release binaries.
 
-[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.3.0...v0.4.0

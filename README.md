@@ -78,6 +78,14 @@ opaquedrop collect --key ./family-photos.key.json --out ./received
 
 `--list` fetches no file chunks. It authenticates and decrypts each pending filename locally, then shows the upload ID, sanitized name, declared size, completion time, and acknowledgement state so the recipient can choose an item with `--upload ID`. Add `--all` to include acknowledged submissions. The upload page retries a temporarily interrupted setup, chunk, or completion request three times while that page remains open. The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically publishes it without replacing an existing name, and only then acknowledges collection. A damaged or malicious submission is reported by upload ID but does not block later healthy submissions; any failure still makes the command exit nonzero. Temporary list, manifest, and chunk GET failures retry three times by default, so one interrupted chunk does not restart the current file. Use repeatable `--upload ID` for an explicit subset, `--fail-fast` for first-error automation, or `--read-retries 0` to disable read retries.
 
+If a link was shared too broadly or the intake is finished early, the recipient can close it before expiry:
+
+```console
+opaquedrop request close --key ./family-photos.key.json
+```
+
+Closing is irreversible. It refuses new setup, chunk, and completion operations but does not delete ciphertext: submissions already completed remain available to list, collect, and acknowledge, while incomplete submissions cannot continue. Keep the key file until every wanted completed submission has been collected.
+
 ## Keep the recipient key off the server
 
 `request create` is convenient when the recipient and server owner are the same person. To keep a hosting administrator technically unable to decrypt submissions, split request generation from server import:
@@ -109,6 +117,7 @@ The public bundle contains a P-256 public key and SHA-256 hashes of two independ
 - Browser upload retries reuse the exact same manifest, ciphertext, and completion identity. An already-stored chunk advances only after its SHA-256 digest matches; a different manifest under the same upload ID remains a conflict.
 - Manifest bodies are limited to 64 KiB; ciphertext chunks are limited to 8 MiB; the shipped browser uses 1 MiB chunks.
 - Request file and byte quotas count incomplete reservations, closing the obvious concurrent-overcommit path.
+- A collect-capability closure is idempotent and moves the active bundle into durable fail-closed state; valid submit operations receive HTTP 410 afterward while completed collect routes remain usable.
 - Capability tokens arrive only in an `Authorization` header, are stored only as hashes, and are not logged.
 - Forwarded client IPs affect only the small invalid-capability limiter, and only when the direct peer matches an explicitly configured trusted-proxy CIDR; the limiter retains at most 4,096 active buckets.
 - Cross-site API requests are rejected; the browser capability starts in the URL fragment, moves to session storage, and is removed from the address bar.
@@ -129,7 +138,7 @@ These checks are evidence about this implementation, not a substitute for an ind
 
 ```text
 opaquedrop init       Create private state directories
-opaquedrop request    Make, import, or create a request
+opaquedrop request    Make, import, create, or irreversibly close a request
 opaquedrop serve      Run the HTTP service (loopback by default)
 opaquedrop collect    Download, authenticate, decrypt, and acknowledge files
 opaquedrop doctor     Check the data directory and storage shape
@@ -138,6 +147,8 @@ opaquedrop version    Print the build version
 ```
 
 `purge` is a dry run unless `--apply` is supplied. A request can opt into deleting server ciphertext immediately after a verified collector acknowledgement with `--delete-after-collect`; the default keeps it until expiry cleanup so a recipient can recover from a local mistake.
+
+`request close --key FILE` uses the recipient key file's collect capability. It is not a deletion command and does not shorten ciphertext retention. Do not downgrade below v0.7.0 after closing a request: older binaries do not understand the closed-request directory and cannot collect it safely.
 
 `collect` processes unacknowledged submissions in completion order. It keeps going after a per-submission authentication or protocol failure, but stops immediately for cancellation, `--fail-fast`, or an output-filesystem error. An explicitly selected acknowledged upload may be collected again when retained ciphertext is still available.
 
