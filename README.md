@@ -102,6 +102,7 @@ The public bundle contains a P-256 public key and SHA-256 hashes of two independ
 - Capability tokens arrive only in an `Authorization` header, are stored only as hashes, and are not logged.
 - Cross-site API requests are rejected; the browser capability starts in the URL fragment, moves to session storage, and is removed from the address bar.
 - Server completion markers and collector outputs use same-filesystem atomic rename.
+- Request and upload identifiers are allowlisted and reduced to basename components before storage paths are constructed.
 - Decrypted names are reduced to a basename, platform-dangerous characters are replaced, collisions are suffixed, and the output directory cannot be a symlink.
 
 These checks are evidence about this implementation, not a substitute for an independent security review. The exact [wire and storage format](docs/PROTOCOL.md) and [committed test vector](testdata/protocol-v1.json) are public.

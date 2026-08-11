@@ -14,6 +14,7 @@ All notable changes are documented here.
 - Exact ciphertext receipts and authenticated header binding.
 - Cross-platform collector with atomic, filename-safe output.
 - File/byte quotas, expiry, dry-run cleanup, security headers, and cross-origin rejection.
+- Defense-in-depth request/upload identifier confinement before filesystem access.
 - Deterministic browser WebCrypto ↔ Go test vector and adversarial corruption/reordering tests.
 - Embedded responsive upload UI and dependency-free release binaries.
 
