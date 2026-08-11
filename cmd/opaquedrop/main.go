@@ -24,6 +24,17 @@ import (
 
 var version = "dev"
 
+type repeatedStringFlag []string
+
+func (f *repeatedStringFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *repeatedStringFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -181,7 +192,13 @@ func serveCommand(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	data := flags.String("data", "opaquedrop-data", "server data directory")
 	listen := flags.String("listen", "127.0.0.1:8080", "listen address")
+	var trustedProxyValues repeatedStringFlag
+	flags.Var(&trustedProxyValues, "trusted-proxy", "trusted reverse-proxy IP or CIDR for X-Forwarded-For (repeatable)")
 	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	trustedProxies, err := server.ParseTrustedProxies(trustedProxyValues)
+	if err != nil {
 		return err
 	}
 	s := store.New(*data)
@@ -191,7 +208,7 @@ func serveCommand(args []string) error {
 	if _, err := s.Doctor(); err != nil {
 		return err
 	}
-	err := server.New(s, log.New(os.Stdout, "", log.LstdFlags|log.LUTC)).Listen(*listen)
+	err = server.New(s, log.New(os.Stdout, "", log.LstdFlags|log.LUTC), server.WithTrustedProxies(trustedProxies)).Listen(*listen)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -354,7 +371,7 @@ Usage:
   opaquedrop request make --base-url URL --label TEXT [options]
   opaquedrop request import --data DIR --bundle FILE
   opaquedrop request create --data DIR --base-url URL --label TEXT [options]
-  opaquedrop serve --data DIR [--listen 127.0.0.1:8080]
+  opaquedrop serve --data DIR [--listen 127.0.0.1:8080] [--trusted-proxy IP_OR_CIDR]
   opaquedrop collect --key FILE --out DIR
   opaquedrop doctor --data DIR
   opaquedrop purge --data DIR [--apply]

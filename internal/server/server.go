@@ -8,12 +8,11 @@ import (
 	"io"
 	"log"
 	"mime"
-	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/CAOShurong/opaquedrop/internal/model"
@@ -24,16 +23,30 @@ import (
 var webFiles embed.FS
 
 type Server struct {
-	Store   *store.Store
-	Logger  *log.Logger
-	Limiter *failureLimiter
+	Store     *store.Store
+	Logger    *log.Logger
+	Limiter   *failureLimiter
+	clientIPs clientIPResolver
 }
 
-func New(s *store.Store, logger *log.Logger) *Server {
+type Option func(*Server)
+
+func WithTrustedProxies(prefixes []netip.Prefix) Option {
+	trusted := append([]netip.Prefix(nil), prefixes...)
+	return func(s *Server) {
+		s.clientIPs = newClientIPResolver(trusted)
+	}
+}
+
+func New(s *store.Store, logger *log.Logger, options ...Option) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Server{Store: s, Logger: logger, Limiter: newFailureLimiter()}
+	result := &Server{Store: s, Logger: logger, Limiter: newFailureLimiter(), clientIPs: newClientIPResolver(nil)}
+	for _, option := range options {
+		option(result)
+	}
+	return result
 }
 
 func (s *Server) Handler() http.Handler {
@@ -256,8 +269,9 @@ func (s *Server) collectAuth(w http.ResponseWriter, r *http.Request) (model.Requ
 }
 
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request, kind string) (model.RequestBundle, bool) {
-	ip := clientIP(r)
+	ip := s.clientIPs.resolve(r)
 	if s.Limiter.blocked(ip) {
+		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "AUTH_RATE_LIMITED", "Too many failed authorization attempts. Try again later.")
 		return model.RequestBundle{}, false
 	}
@@ -348,50 +362,4 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
-}
-
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
-}
-
-type failureWindow struct {
-	start time.Time
-	count int
-}
-
-type failureLimiter struct {
-	mu      sync.Mutex
-	windows map[string]failureWindow
-	now     func() time.Time
-}
-
-func newFailureLimiter() *failureLimiter {
-	return &failureLimiter{windows: map[string]failureWindow{}, now: time.Now}
-}
-
-func (l *failureLimiter) blocked(ip string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	w, ok := l.windows[ip]
-	if !ok || l.now().Sub(w.start) >= time.Minute {
-		delete(l.windows, ip)
-		return false
-	}
-	return w.count >= 12
-}
-
-func (l *failureLimiter) failure(ip string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := l.now()
-	w, ok := l.windows[ip]
-	if !ok || now.Sub(w.start) >= time.Minute {
-		w = failureWindow{start: now}
-	}
-	w.count++
-	l.windows[ip] = w
 }

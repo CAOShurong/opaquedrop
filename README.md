@@ -61,8 +61,13 @@ opaquedrop request create \
 Start the service on loopback and let a reverse proxy terminate TLS:
 
 ```console
-opaquedrop serve --data ./opaquedrop-data --listen 127.0.0.1:8080
+opaquedrop serve \
+  --data ./opaquedrop-data \
+  --listen 127.0.0.1:8080 \
+  --trusted-proxy 127.0.0.1/32
 ```
+
+`--trusted-proxy` is opt-in and repeatable. It lets the invalid-capability limiter distinguish clients behind only those explicitly trusted proxy addresses. Omit it when clients connect directly; OpaqueDrop ignores `X-Forwarded-For` from every untrusted peer. See the [proxy trust boundary](docs/DEPLOYMENT.md#client-ip-and-rate-limit-boundary).
 
 Share the printed upload link. After files arrive, collect and authenticate them:
 
@@ -100,6 +105,7 @@ The public bundle contains a P-256 public key and SHA-256 hashes of two independ
 - Manifest bodies are limited to 64 KiB; ciphertext chunks are limited to 8 MiB; the shipped browser uses 1 MiB chunks.
 - Request file and byte quotas count incomplete reservations, closing the obvious concurrent-overcommit path.
 - Capability tokens arrive only in an `Authorization` header, are stored only as hashes, and are not logged.
+- Forwarded client IPs affect only the small invalid-capability limiter, and only when the direct peer matches an explicitly configured trusted-proxy CIDR; the limiter retains at most 4,096 active buckets.
 - Cross-site API requests are rejected; the browser capability starts in the URL fragment, moves to session storage, and is removed from the address bar.
 - Server completion markers and collector outputs use same-filesystem atomic rename.
 - Request and upload identifiers are allowlisted and reduced to basename components before storage paths are constructed.
@@ -130,7 +136,7 @@ opaquedrop version    Print the build version
 
 ## Deployment
 
-OpaqueDrop defaults to `127.0.0.1:8080`. Public Web Crypto requires HTTPS. The [deployment guide](docs/DEPLOYMENT.md) includes Caddy, nginx, and systemd examples, backup boundaries, proxy-log cautions, and upgrades. Release archives include one binary plus documentation; no database migration or external service is required.
+OpaqueDrop defaults to `127.0.0.1:8080`. Public Web Crypto requires HTTPS. The [deployment guide](docs/DEPLOYMENT.md) includes Caddy, nginx, explicit trusted-proxy configuration, backup boundaries, proxy-log cautions, and upgrades. Release archives include one binary plus documentation; no database migration or external service is required.
 
 ## Browser support
 

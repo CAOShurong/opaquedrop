@@ -16,6 +16,12 @@ drop.example.net {
 
 Caddy does not log authorization headers in its standard access log. If you customize log fields, never add `Authorization` or the URL fragment (fragments do not reach the server in a conforming browser).
 
+Run OpaqueDrop with the exact Caddy upstream address as a trusted proxy:
+
+```console
+opaquedrop serve --data /var/lib/opaquedrop --listen 127.0.0.1:8080 --trusted-proxy 127.0.0.1/32
+```
+
 ## nginx
 
 ```nginx
@@ -30,11 +36,24 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
     }
 }
 ```
 
-OpaqueDrop never trusts `X-Forwarded-For` for authorization or rate limiting. Its small invalid-capability limiter sees the proxy address; use the proxy's own rate controls if the service is exposed broadly.
+The nginx example is a single edge proxy, so it overwrites any client-supplied `X-Forwarded-For` instead of preserving it. Start OpaqueDrop with `--trusted-proxy 127.0.0.1/32` as in the Caddy example.
+
+## Client IP and rate-limit boundary
+
+OpaqueDrop uses client IPs only for its small invalid-capability limiter. They do not grant access and do not replace the submit or collect capability.
+
+- By default, only the immediate TCP peer identifies the limiter bucket and every forwarded header is ignored.
+- `--trusted-proxy IP_OR_CIDR` is repeatable. Only when the immediate peer matches one of these ranges does OpaqueDrop read `X-Forwarded-For`.
+- For a proxy chain, OpaqueDrop walks the header from right to left, skips configured trusted proxies, and selects the first untrusted address. A malformed hop encountered before that selection fails closed to the immediate peer; data farther left cannot override an already selected client.
+- Configure the smallest exact proxy ranges. Trusting a client-reachable or overly broad network lets clients choose limiter identities and evade this defense-in-depth throttle.
+- Every trusted edge proxy must overwrite or safely append the address it observed. Do not pass a client-controlled identity header unchanged.
+
+The limiter allows 12 failed capability checks per client per minute, returns `Retry-After: 60` while blocked, and retains at most 4,096 active buckets. Excess distinct clients share a bounded overflow bucket. State is intentionally in memory and resets on restart. This is not distributed-denial-of-service protection, and it does not stop a holder of a valid submit capability from consuming that request's quota. Keep proxy-level connection, request, and bandwidth controls for public deployments.
 
 ## systemd
 
@@ -49,7 +68,7 @@ Wants=network-online.target
 [Service]
 User=opaquedrop
 Group=opaquedrop
-ExecStart=/usr/local/bin/opaquedrop serve --data /var/lib/opaquedrop --listen 127.0.0.1:8080
+ExecStart=/usr/local/bin/opaquedrop serve --data /var/lib/opaquedrop --listen 127.0.0.1:8080 --trusted-proxy 127.0.0.1/32
 Restart=on-failure
 RestartSec=3s
 NoNewPrivileges=true
@@ -104,4 +123,4 @@ The binary does not create a scheduler. If an operator adds a systemd timer, its
 4. Run `opaquedrop version` and `opaquedrop doctor --data ...` with the new binary.
 5. Stop the service, replace the binary, and start it.
 
-Protocol and state schemas are versioned. v0.1.x does not perform an in-place database migration because there is no database. If a future release requires a state transformation, its release notes must provide an explicit backup and rollback path.
+Protocol and state schemas are versioned. v0.x does not perform an in-place database migration because there is no database. If a future release requires a state transformation, its release notes must provide an explicit backup and rollback path.
