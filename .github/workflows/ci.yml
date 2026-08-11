@@ -20,8 +20,11 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-      - name: Verify WebCrypto protocol vector
-        run: node scripts/protocol-vector.mjs
+      - name: Verify browser protocol and retry paths
+        run: |
+          node scripts/protocol-vector.mjs
+          node scripts/browser-retry.mjs
+          node scripts/browser-upload.mjs
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
       - name: Test with race detector

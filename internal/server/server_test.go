@@ -283,6 +283,43 @@ func uploadAll(t *testing.T, f *fixture, upload sealedUpload) model.Receipt {
 	return complete(t, f, upload, http.StatusOK)
 }
 
+func TestBeginUploadExactRetryIsIdempotent(t *testing.T) {
+	f := newFixture(t, 1, 1<<20)
+	upload := seal(t, f, "JJJJJJJJJJJJJJJJJJJJJJ", []byte("retry manifest exactly"), "retry.txt", store.MinChunkSize)
+
+	begin(t, f, upload, http.StatusCreated)
+	begin(t, f, upload, http.StatusCreated)
+
+	conflicting := seal(t, f, upload.manifest.UploadID, []byte("different manifest"), "other.txt", store.MinChunkSize)
+	begin(t, f, conflicting, http.StatusConflict)
+
+	for index := range upload.chunks {
+		put(t, f, upload, index, http.StatusNoContent)
+	}
+	receipt := complete(t, f, upload, http.StatusOK)
+	if receipt.UploadID != upload.manifest.UploadID || receipt.ReceiptSHA256 == "" {
+		t.Fatalf("receipt after retried manifest = %+v", receipt)
+	}
+}
+
+func TestUploadPageLoadsRetryHelperBeforeApplication(t *testing.T) {
+	f := newFixture(t, 1, 1<<20)
+	response, body := request(t, f, http.MethodGet, "/r/"+f.bundle.ID, "", nil, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("request page status = %d", response.StatusCode)
+	}
+	page := string(body)
+	retryPosition := strings.Index(page, `/assets/retry.js`)
+	appPosition := strings.Index(page, `/assets/app.js`)
+	if retryPosition < 0 || appPosition < 0 || retryPosition >= appPosition {
+		t.Fatalf("script order retry=%d app=%d", retryPosition, appPosition)
+	}
+	response, body = request(t, f, http.MethodGet, "/assets/retry.js", "", nil, nil)
+	if response.StatusCode != http.StatusOK || !strings.Contains(response.Header.Get("Content-Type"), "javascript") || !bytes.Contains(body, []byte("OpaqueDropRetry")) {
+		t.Fatalf("retry asset status=%d type=%q body=%q", response.StatusCode, response.Header.Get("Content-Type"), body)
+	}
+}
+
 func TestBrowserCompatibleSuccessAndServerBlindStorage(t *testing.T) {
 	f := newFixture(t, 3, 4<<20)
 	plaintext := bytes.Repeat([]byte("recipient-only-secret-content|"), 5000)

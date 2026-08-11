@@ -117,6 +117,14 @@ The collector makes one initial attempt plus three read retries by default for l
 
 This is in-process request recovery, not restart-safe resume: terminating the collector removes its random `.part` file, and a later command starts that file again. OpaqueDrop sends acknowledgement POST once and refuses redirects rather than replaying it at a new location. With `--delete-after-collect`, a successful acknowledgement deletes the upload, so a lost response followed by a retry would be indistinguishable from an upload that never existed; the collector instead preserves the saved-file result and reports the acknowledgement failure.
 
+### Browser upload interruptions
+
+The upload page makes one initial attempt plus three retries for manifest setup, each 1 MiB ciphertext chunk, and receipt finalization after a network failure or temporary 408, 425, 429, 500, 502, 503, or 504 response. Backoff is 250 ms, 500 ms, then 1 second. `Retry-After` seconds or HTTP dates are honored through 30 seconds; a longer value stops with an explicit error instead of retrying early.
+
+Every retry reuses the same in-memory file key, upload ID, manifest bytes, and ciphertext. The server accepts an exact manifest replay only when the existing upload directory has the expected manifest, server state, and chunks directory; different bytes remain a conflict. If a chunk response was lost after storage, the repeated PUT conflicts and the page uses the existing authenticated HEAD digest to confirm that the stored ciphertext is identical. Completion is already idempotent and returns the same persisted receipt.
+
+This recovery lasts only while the page remains open. Reloading or closing it discards the ephemeral private key and starts a new upload identity when the file is selected again. OpaqueDrop deliberately does not put file keys or resumable state into local storage. Configure proxy request timeouts and body limits normally; retries reduce the cost of isolated interruptions but do not repair a persistently broken proxy.
+
 ## Cleanup
 
 Preview expired requests and incomplete uploads older than 24 hours:

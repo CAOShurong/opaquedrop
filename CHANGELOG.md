@@ -4,6 +4,20 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-11
+
+### Added
+
+- Same-tab browser retries for interrupted manifest setup, individual chunk uploads, and receipt finalization.
+- Bounded 250/500/1000 ms backoff for network failures and temporary 408/425/429/500/502/503/504 responses, with `Retry-After` support up to 30 seconds.
+- Headless Node coverage that executes the shipped browser application through lost-response recovery for setup, chunk, and completion requests.
+
+### Changed
+
+- Repeating the exact same valid manifest for an existing, complete upload directory shape is now idempotent and does not consume quota twice; a different manifest with the same upload ID remains a conflict.
+- Browser chunk retry continues to verify an already-stored ciphertext digest with the existing authenticated HEAD endpoint before advancing progress.
+- Upload retry state remains in the current page only; file keys are not persisted and cross-reload resume is still intentionally unsupported.
+
 ## [0.4.0] - 2026-08-11
 
 ### Added
@@ -62,7 +76,8 @@ All notable changes are documented here.
 - Deterministic browser WebCrypto ↔ Go test vector and adversarial corruption/reordering tests.
 - Embedded responsive upload UI and dependency-free release binaries.
 
-[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.1.0...v0.2.0

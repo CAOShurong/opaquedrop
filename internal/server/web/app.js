@@ -11,6 +11,7 @@
   }
   const token = sessionStorage.getItem(tokenKey) || "";
   const state = { info: null, files: [], busy: false };
+  const uploadRetry = globalThis.OpaqueDropRetry;
 
   const $ = (id) => document.getElementById(id);
   const loading = $("loading");
@@ -26,6 +27,7 @@
   async function boot() {
     if (!token) return showError("This upload link is missing its private capability. Ask the recipient for the complete link.");
     if (!window.crypto?.subtle || !window.isSecureContext) return showError("Browser encryption requires HTTPS. Localhost is also allowed for testing.");
+    if (!uploadRetry) return showError("Upload retry support failed to load. Reload this page before selecting files.");
     try {
       state.info = await api(`/api/v1/requests/${requestId}`);
       $("request-label").textContent = state.info.label;
@@ -135,7 +137,7 @@
     };
     const manifestBody = JSON.stringify(manifest);
     const manifestDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", text.encode(manifestBody)));
-    await api(`/api/v1/requests/${requestId}/uploads`, { method: "POST", body: manifestBody, headers: { "Content-Type": "application/json" } });
+    await retryUpload("file setup", rowIndex, () => api(`/api/v1/requests/${requestId}/uploads`, { method: "POST", body: manifestBody, headers: { "Content-Type": "application/json" } }));
     const chunkDigests = [];
     for (let index = 0; index < chunkCount; index++) {
       const start = index * chunkSize;
@@ -143,10 +145,10 @@
       const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce(noncePrefix, index), additionalData: text.encode(`opaquedrop/v1|${requestId}|${uploadId}|header|${headerHash}|chunk|${index}`), tagLength: 128 }, aes, plain));
       const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", ciphertext));
       chunkDigests.push(digest);
-      await putChunk(uploadId, index, ciphertext, hex(digest));
+      await retryUpload(`chunk ${index + 1} of ${chunkCount}`, rowIndex, () => putChunk(uploadId, index, ciphertext, hex(digest)));
       setProgress(rowIndex, ((index + 1) / chunkCount) * 100);
     }
-    const receipt = await api(`/api/v1/requests/${requestId}/uploads/${uploadId}/complete`, { method: "POST" });
+    const receipt = await retryUpload("receipt finalization", rowIndex, () => api(`/api/v1/requests/${requestId}/uploads/${uploadId}/complete`, { method: "POST" }));
     const localReceipt = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", concat(text.encode("OpaqueDrop receipt v1\0"), manifestDigest, ...chunkDigests))));
     if (localReceipt !== receipt.receipt_sha256) throw new Error("server receipt did not match browser ciphertext");
     return receipt;
@@ -157,25 +159,64 @@
     try {
       await api(path, { method: "PUT", body: ciphertext });
     } catch (error) {
-      if (!error.message.includes("UPLOAD_CONFLICT")) throw error;
-      const response = await fetch(path, { method: "HEAD", headers: authHeaders() });
-      if (!response.ok || response.headers.get("X-OpaqueDrop-SHA256") !== digest) throw error;
+      if (error.status !== 409) throw error;
+      const response = await fetchOnce(path, { method: "HEAD", headers: authHeaders() });
+      if (!response.ok) {
+        const headError = new Error(`HTTP ${response.status}`);
+        headError.status = response.status;
+        headError.retryAfter = response.headers.get("Retry-After") || "";
+        throw headError;
+      }
+      if (response.headers.get("X-OpaqueDrop-SHA256") !== digest) throw error;
     }
+  }
+
+  async function retryUpload(label, rowIndex, operation) {
+    const result = await uploadRetry.run(operation, {
+      onRetry: ({ attempt, totalAttempts }) => {
+        button.textContent = `Connection interrupted; retrying ${label} (${attempt + 1}/${totalAttempts})...`;
+      }
+    });
+    button.textContent = `Uploading ${rowIndex + 1} of ${state.files.length}...`;
+    return result;
   }
 
   async function api(path, options = {}) {
     const headers = { ...authHeaders(), ...(options.headers || {}) };
-    const response = await fetch(path, { ...options, headers });
+    const response = await fetchOnce(path, { ...options, headers });
     if (!response.ok) {
       let message = `HTTP ${response.status}`;
       try {
         const payload = await response.json();
         message = `${payload.error.code}: ${payload.error.message}`;
       } catch (_) { /* keep HTTP status */ }
-      throw new Error(message);
+      const error = new Error(message);
+      error.status = response.status;
+      error.retryAfter = response.headers.get("Retry-After") || "";
+      throw error;
     }
     if (response.status === 204) return null;
-    return response.json();
+    try {
+      return await response.json();
+    } catch (cause) {
+      if (cause?.name !== "TypeError") throw cause;
+      throw networkFailure(cause);
+    }
+  }
+
+  async function fetchOnce(path, options) {
+    try {
+      return await fetch(path, options);
+    } catch (cause) {
+      throw networkFailure(cause);
+    }
+  }
+
+  function networkFailure(cause) {
+    const error = new Error("Network request failed");
+    error.opaqueDropNetworkFailure = true;
+    error.cause = cause;
+    return error;
   }
 
   function authHeaders() { return { Authorization: `OpaqueDrop ${token}` }; }
