@@ -256,6 +256,180 @@ func TestReadRetryBoundaries(t *testing.T) {
 	})
 }
 
+func TestWaitForReceiptsPollsUntilPendingSubmission(t *testing.T) {
+	const requestID = "RRRRRRRRRRRRRRRRRRRRRR"
+	const uploadID = "UUUUUUUUUUUUUUUUUUUUUU"
+	listRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		listRequests++
+		uploads := []model.Receipt{}
+		if listRequests >= 3 {
+			uploads = append(uploads, model.Receipt{RequestID: requestID, UploadID: uploadID})
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"uploads": uploads})
+	}))
+	defer server.Close()
+
+	client := New(model.KeyFile{RequestID: requestID, ServerURL: server.URL, CollectToken: "collect-token"})
+	client.HTTP = server.Client()
+	now := time.Date(2026, time.August, 12, 1, 2, 3, 0, time.UTC)
+	client.now = func() time.Time { return now }
+	var delays []time.Duration
+	client.sleep = func(ctx context.Context, delay time.Duration) error {
+		delays = append(delays, delay)
+		now = now.Add(delay)
+		return nil
+	}
+
+	receipts, err := client.WaitForReceipts(t.Context(), WaitOptions{
+		Timeout: 10 * time.Second, PollInterval: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listRequests != 3 || len(receipts) != 1 || receipts[0].UploadID != uploadID {
+		t.Fatalf("requests=%d receipts=%+v", listRequests, receipts)
+	}
+	if fmt.Sprint(delays) != "[2s 2s]" {
+		t.Fatalf("poll delays = %v", delays)
+	}
+}
+
+func TestWaitForReceiptsRequiresAllExplicitUploadIDs(t *testing.T) {
+	const requestID = "RRRRRRRRRRRRRRRRRRRRRR"
+	const firstID = "AAAAAAAAAAAAAAAAAAAAAA"
+	const secondID = "BBBBBBBBBBBBBBBBBBBBBB"
+	listRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		listRequests++
+		uploads := []model.Receipt{{RequestID: requestID, UploadID: firstID, Acknowledged: true}}
+		if listRequests >= 2 {
+			uploads = append(uploads, model.Receipt{RequestID: requestID, UploadID: secondID})
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{"uploads": uploads})
+	}))
+	defer server.Close()
+
+	client := New(model.KeyFile{RequestID: requestID, ServerURL: server.URL, CollectToken: "collect-token"})
+	client.HTTP = server.Client()
+	client.now = time.Now
+	client.sleep = func(context.Context, time.Duration) error { return nil }
+	receipts, err := client.WaitForReceipts(t.Context(), WaitOptions{
+		Timeout: time.Minute, PollInterval: time.Second, UploadIDs: []string{firstID, secondID, firstID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listRequests != 2 || len(receipts) != 2 {
+		t.Fatalf("requests=%d receipts=%+v", listRequests, receipts)
+	}
+}
+
+func TestWaitForReceiptsUsesBoundedFinalDelay(t *testing.T) {
+	listRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		listRequests++
+		_, _ = response.Write([]byte(`{"uploads":[]}`))
+	}))
+	defer server.Close()
+
+	client := New(model.KeyFile{RequestID: "RRRRRRRRRRRRRRRRRRRRRR", ServerURL: server.URL, CollectToken: "collect-token"})
+	client.HTTP = server.Client()
+	now := time.Date(2026, time.August, 12, 1, 2, 3, 0, time.UTC)
+	client.now = func() time.Time { return now }
+	var delays []time.Duration
+	client.sleep = func(ctx context.Context, delay time.Duration) error {
+		delays = append(delays, delay)
+		now = now.Add(delay)
+		return nil
+	}
+
+	_, err := client.WaitForReceipts(t.Context(), WaitOptions{
+		Timeout: 5 * time.Second, PollInterval: 2 * time.Second,
+	})
+	if !errors.Is(err, ErrWaitTimeout) {
+		t.Fatalf("WaitForReceipts error = %v", err)
+	}
+	if listRequests != 4 || fmt.Sprint(delays) != "[2s 2s 1s]" {
+		t.Fatalf("requests=%d delays=%v", listRequests, delays)
+	}
+}
+
+func TestWaitForReceiptsPropagatesCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		_, _ = response.Write([]byte(`{"uploads":[]}`))
+	}))
+	defer server.Close()
+	client := New(model.KeyFile{RequestID: "RRRRRRRRRRRRRRRRRRRRRR", ServerURL: server.URL, CollectToken: "collect-token"})
+	client.HTTP = server.Client()
+	client.sleep = func(context.Context, time.Duration) error { return context.Canceled }
+	_, err := client.WaitForReceipts(t.Context(), WaitOptions{
+		Timeout: time.Minute, PollInterval: time.Second,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WaitForReceipts error = %v", err)
+	}
+}
+
+func TestWaitForReceiptsBoundsAnInFlightListRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		select {
+		case <-request.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer server.Close()
+	client := New(model.KeyFile{RequestID: "RRRRRRRRRRRRRRRRRRRRRR", ServerURL: server.URL, CollectToken: "collect-token"})
+	client.HTTP = server.Client()
+	started := time.Now()
+	_, err := client.WaitForReceipts(t.Context(), WaitOptions{
+		Timeout: 100 * time.Millisecond, PollInterval: time.Second,
+	})
+	if !errors.Is(err, ErrWaitTimeout) {
+		t.Fatalf("WaitForReceipts error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("in-flight list exceeded wait deadline: %s", elapsed)
+	}
+}
+
+func TestCollectWaitsBeforeSelectingReceipts(t *testing.T) {
+	const requestID = "RRRRRRRRRRRRRRRRRRRRRR"
+	const uploadID = "UUUUUUUUUUUUUUUUUUUUUU"
+	listRequests := 0
+	manifestRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/uploads"):
+			listRequests++
+			uploads := []model.Receipt{}
+			if listRequests >= 2 {
+				uploads = append(uploads, model.Receipt{RequestID: requestID, UploadID: uploadID})
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"uploads": uploads})
+		case strings.HasSuffix(request.URL.Path, "/manifest"):
+			manifestRequests++
+			http.Error(response, "fixture manifest failure", http.StatusNotFound)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	client := New(model.KeyFile{RequestID: requestID, ServerURL: server.URL, CollectToken: "collect-token"})
+	client.HTTP = server.Client()
+	client.ReadRetries = 0
+	client.sleep = func(context.Context, time.Duration) error { return nil }
+	_, err := client.Collect(t.Context(), t.TempDir(), CollectOptions{
+		WaitTimeout: time.Minute, PollInterval: time.Second,
+	})
+	if err == nil || errors.Is(err, ErrWaitTimeout) {
+		t.Fatalf("Collect error = %v", err)
+	}
+	if listRequests != 2 || manifestRequests != 1 {
+		t.Fatalf("list requests=%d manifest requests=%d", listRequests, manifestRequests)
+	}
+}
+
 func TestInvalidListJSONIsNotRetried(t *testing.T) {
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

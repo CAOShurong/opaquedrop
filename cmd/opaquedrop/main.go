@@ -253,6 +253,8 @@ func collectCommand(args []string) error {
 	listOnly := flags.Bool("list", false, "list completed submissions without downloading file content")
 	includeAcknowledged := flags.Bool("all", false, "with --list, include acknowledged submissions")
 	readRetries := flags.Int("read-retries", collector.DefaultReadRetries, "retries after a temporary list, manifest, or chunk read failure (0-10)")
+	waitTimeout := flags.Duration("wait", 0, "wait up to this duration for matching completed submissions (maximum 24h)")
+	pollInterval := flags.Duration("poll-interval", collector.DefaultPollInterval, "receipt-list interval while waiting (1s-5m)")
 	var uploadIDs repeatedStringFlag
 	flags.Var(&uploadIDs, "upload", "collect only this completed upload ID (repeatable; acknowledged uploads may be re-collected)")
 	if err := flags.Parse(args); err != nil {
@@ -260,6 +262,21 @@ func collectCommand(args []string) error {
 	}
 	if *readRetries < 0 || *readRetries > collector.MaxReadRetries {
 		return fmt.Errorf("--read-retries must be between 0 and %d", collector.MaxReadRetries)
+	}
+	pollIntervalSet := false
+	flags.Visit(func(visited *flag.Flag) {
+		if visited.Name == "poll-interval" {
+			pollIntervalSet = true
+		}
+	})
+	if *waitTimeout < 0 || *waitTimeout > collector.MaxWaitTimeout {
+		return fmt.Errorf("--wait must be between 0 and %s", collector.MaxWaitTimeout)
+	}
+	if *pollInterval < collector.MinPollInterval || *pollInterval > collector.MaxPollInterval {
+		return fmt.Errorf("--poll-interval must be between %s and %s", collector.MinPollInterval, collector.MaxPollInterval)
+	}
+	if *waitTimeout == 0 && pollIntervalSet {
+		return errors.New("--poll-interval requires a positive --wait duration")
 	}
 	if *includeAcknowledged && !*listOnly {
 		return errors.New("--all requires --list")
@@ -281,9 +298,15 @@ func collectCommand(args []string) error {
 	client.RetryLog = os.Stderr
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	if *waitTimeout > 0 {
+		if _, err := fmt.Fprintf(os.Stderr, "Waiting up to %s for matching completed submissions (polling every %s; Ctrl+C cancels).\n", *waitTimeout, *pollInterval); err != nil {
+			return err
+		}
+	}
 	if *listOnly {
 		inspections, inspectErr := client.Inspect(ctx, collector.InspectOptions{
 			UploadIDs: uploadIDs, IncludeAcknowledged: *includeAcknowledged, FailFast: *failFast,
+			WaitTimeout: *waitTimeout, PollInterval: *pollInterval,
 		})
 		var outputErr error
 		if len(inspections) == 0 && inspectErr == nil {
@@ -299,9 +322,11 @@ func collectCommand(args []string) error {
 		return errors.Join(inspectErr, outputErr)
 	}
 	results, collectErr := client.Collect(ctx, *out, collector.CollectOptions{
-		Acknowledge: !*noAck,
-		UploadIDs:   uploadIDs,
-		FailFast:    *failFast,
+		Acknowledge:  !*noAck,
+		UploadIDs:    uploadIDs,
+		FailFast:     *failFast,
+		WaitTimeout:  *waitTimeout,
+		PollInterval: *pollInterval,
 	})
 	if len(results) == 0 && collectErr == nil {
 		fmt.Println("No unacknowledged submissions.")
@@ -459,8 +484,8 @@ Usage:
   opaquedrop request create --data DIR --base-url URL --label TEXT [options]
   opaquedrop request close --key FILE
   opaquedrop serve --data DIR [--listen 127.0.0.1:8080] [--trusted-proxy IP_OR_CIDR]
-  opaquedrop collect --key FILE --out DIR [--upload ID] [--fail-fast] [--read-retries N]
-  opaquedrop collect --key FILE --list [--all] [--upload ID] [--fail-fast] [--read-retries N]
+  opaquedrop collect --key FILE --out DIR [--upload ID] [--wait DURATION] [--poll-interval DURATION] [--fail-fast] [--read-retries N]
+  opaquedrop collect --key FILE --list [--all] [--upload ID] [--wait DURATION] [--poll-interval DURATION] [--fail-fast] [--read-retries N]
   opaquedrop doctor --data DIR
   opaquedrop purge --data DIR [--apply]
   opaquedrop version

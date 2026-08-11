@@ -38,6 +38,20 @@ func TestCollectRejectsAllWithoutListBeforeReadingKey(t *testing.T) {
 	}
 }
 
+func TestCollectRejectsInvalidWaitBeforeReadingKey(t *testing.T) {
+	for _, args := range [][]string{
+		{"collect", "--key", "missing.json", "--wait", "-1s"},
+		{"collect", "--key", "missing.json", "--wait", "25h"},
+		{"collect", "--key", "missing.json", "--wait", "1m", "--poll-interval", "500ms"},
+		{"collect", "--key", "missing.json", "--poll-interval", "2s"},
+	} {
+		err := run(args)
+		if err == nil || (!strings.Contains(err.Error(), "--wait") && !strings.Contains(err.Error(), "--poll-interval")) {
+			t.Fatalf("collect %v error = %v", args, err)
+		}
+	}
+}
+
 func TestRequestCloseRequiresKey(t *testing.T) {
 	err := run([]string{"request", "close"})
 	if err == nil || !strings.Contains(err.Error(), "--key is required") {
