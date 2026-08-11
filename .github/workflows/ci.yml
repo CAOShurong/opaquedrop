@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Verify WebCrypto protocol vector
+        run: node scripts/protocol-vector.mjs
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build real entry point
+        run: go build -trimpath -o /tmp/opaquedrop ./cmd/opaquedrop
+      - name: Check known Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+          cache: true
+      - name: Test Windows paths and atomic writes
+        run: go test -count=1 ./...
+      - name: Build Windows entry point
+        run: go build -trimpath -o opaquedrop.exe ./cmd/opaquedrop

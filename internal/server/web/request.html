@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Secure upload · OpaqueDrop</title>
+  <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <main class="shell upload-shell">
+    <header class="brand-row compact">
+      <a class="brand-link" href="/"><img class="brand-mark" src="/assets/logo.svg" alt=""><span>OpaqueDrop</span></a>
+      <span class="status-pill"><i></i> Encrypted in this browser</span>
+    </header>
+
+    <section id="loading" class="state-panel" aria-live="polite">
+      <div class="spinner"></div><p>Opening encrypted request…</p>
+    </section>
+
+    <section id="error-panel" class="state-panel error-panel hidden" role="alert">
+      <span class="state-icon">!</span><h1>Request unavailable</h1><p id="error-message">The capability is missing, invalid, or expired.</p>
+    </section>
+
+    <section id="upload-panel" class="upload-layout hidden">
+      <div class="request-intro">
+        <p class="eyebrow">PRIVATE INTAKE</p>
+        <h1 id="request-label">Encrypted file request</h1>
+        <p>Files are sealed to the recipient before upload. The server can see sizes and timing, but not filenames or file contents.</p>
+        <dl class="request-facts">
+          <div><dt>Expires</dt><dd id="expiry">—</dd></div>
+          <div><dt>Remaining</dt><dd id="remaining">—</dd></div>
+          <div><dt>Protocol</dt><dd>P-256 · HKDF · AES-GCM</dd></div>
+        </dl>
+      </div>
+
+      <div class="upload-card">
+        <label id="drop-zone" class="drop-zone" for="file-input">
+          <input id="file-input" type="file" multiple>
+          <span class="upload-glyph">↥</span>
+          <strong>Choose files to encrypt</strong>
+          <span>or drop them here</span>
+        </label>
+        <div id="file-list" class="file-list" aria-live="polite"></div>
+        <button id="upload-button" class="primary-button" disabled>Encrypt and upload</button>
+        <p class="safety-note"><span>Shield</span> Treat received files as untrusted. Encryption protects privacy and integrity; it does not make a file safe to open.</p>
+      </div>
+    </section>
+
+    <section id="results" class="results hidden" aria-live="polite">
+      <div class="result-heading"><p class="eyebrow">PERSISTENCE PROOF</p><h2>Encrypted receipts</h2><p>Keep these hashes if you need to compare what the browser sent with what the recipient collected.</p></div>
+      <div id="receipt-list" class="receipt-list"></div>
+    </section>
+  </main>
+</body>
+</html>

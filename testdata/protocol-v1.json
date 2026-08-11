@@ -1,0 +1,19 @@
+{
+  "vector_version": 1,
+  "generated_by": "Node.js WebCrypto with fixed P-256 scalars",
+  "recipient_private_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+  "recipient_public_key": "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+  "manifest_json": "{\"version\":1,\"request_id\":\"AQEBAQEBAQEBAQEBAQEBAQ\",\"upload_id\":\"AgICAgICAgICAgICAgICAg\",\"algorithm\":\"ECDH-P256+HKDF-SHA256+AES-256-GCM-CHUNKED\",\"ephemeral_public_key\":\"BHzyexiNA09-ilI4AwS1GsPAiWnid_IbNaYLSPxHZpl4B3dVENuO0EApPZrGn3Qw27p9reY86YIpngS3nSJ4c9E\",\"salt\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"nonce_prefix\":\"oKGio6Slpqc\",\"chunk_size\":32,\"chunk_count\":2,\"plain_size\":56,\"header_sha256\":\"5d860d3966ad8c92783f3de64c740c8b5cedaee4fad4d31d5579a5a8d3f3bed4\",\"encrypted_metadata\":\"UYTBRipES2xcQBZOXptuOX0s87VZ1FqMQWarCQTWr52UVBb7roVyFgfZnFoJILPLrCjIYdrk5orw8TfoE02Ufpvc3zJzXelnO_2DK3sO-08YQ4WAt7el3_Eo6w\"}",
+  "ciphertext_chunks": [
+    "x5kxNBxkQuU9rk7mCZZQgTojXRKN-W9JZ2MjNfIbyTpIMJRV-P6NSQasa8pPdbob",
+    "Lj57zjccqKaZeKgILLk1tCLbVDTRX6EzKHqobudHzdu589FpQ0dajg"
+  ],
+  "plaintext_base64url": "YnJvd3Nlci10by1nbyB2ZWN0b3I6IHR3byBhdXRoZW50aWNhdGVkIGNodW5rcywgb3JkZXJlZC4",
+  "metadata_json": "{\"name\":\"../vector?.txt\",\"type\":\"text/plain\",\"last_modified\":1700000000000}",
+  "nonces_hex": [
+    "a0a1a2a3a4a5a6a7ffffffff",
+    "a0a1a2a3a4a5a6a700000000",
+    "a0a1a2a3a4a5a6a700000001"
+  ],
+  "receipt_sha256": "bc44ed74256462da73722ebd11bb9283e256612bce999e4e0d55c292d507309e"
+}

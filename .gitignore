@@ -1,0 +1,10 @@
+/dist/
+/opaquedrop
+/opaquedrop.exe
+/opaquedrop-data/
+/received/
+/*.bundle.json
+/*.key.json
+*.log
+.DS_Store
+Thumbs.db

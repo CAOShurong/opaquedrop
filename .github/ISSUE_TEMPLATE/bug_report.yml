@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a reproducible non-security defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not submit vulnerabilities or real capability links here. Use private vulnerability reporting for security issues.
+  - type: input
+    id: version
+    attributes:
+      label: OpaqueDrop version
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [Linux amd64, Linux arm64, Windows amd64, Windows arm64, macOS amd64, macOS arm64, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction with non-sensitive data
+      description: Include the exact command and observed output, with capabilities redacted.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true

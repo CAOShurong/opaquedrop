@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>OpaqueDrop — encrypted inbound file requests</title>
+  <link rel="icon" href="/assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body class="landing">
+  <main class="shell landing-shell">
+    <header class="brand-row">
+      <img class="brand-mark" src="/assets/logo.svg" alt="">
+      <span>OpaqueDrop</span>
+      <span class="status-pill"><i></i> Local service ready</span>
+    </header>
+    <section class="hero">
+      <p class="eyebrow">SERVER-BLIND INBOUND FILE REQUESTS</p>
+      <h1>Receive the file.<br><span>Not the plaintext.</span></h1>
+      <p class="hero-copy">OpaqueDrop lets anyone upload through a browser while filenames and file bytes are encrypted to a key held by the recipient. The host stores ciphertext, sizes, and timestamps—never a decryption key.</p>
+      <div class="trust-grid" aria-label="Core properties">
+        <article><b>01</b><h2>No uploader account</h2><p>A capability link opens a focused upload page. It cannot list or retrieve submissions.</p></article>
+        <article><b>02</b><h2>Recipient-held key</h2><p>Generate the private key away from the server, then import only the public request bundle.</p></article>
+        <article><b>03</b><h2>Verifiable receipt</h2><p>A SHA-256 receipt covers the exact encrypted manifest and every ciphertext chunk stored.</p></article>
+      </div>
+    </section>
+    <footer class="landing-footer"><span>Accountless · standard-library binary · no telemetry</span><a href="https://github.com/CAOShurong/opaquedrop">Source and threat model ↗</a></footer>
+  </main>
+</body>
+</html>

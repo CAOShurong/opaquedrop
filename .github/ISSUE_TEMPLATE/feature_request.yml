@@ -1,0 +1,25 @@
+name: Focused feature request
+description: Propose an improvement that preserves OpaqueDrop's narrow trust boundary
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Concrete workflow problem
+      description: Who encounters it, what happens now, and why existing tools do not solve it?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Smallest complete change
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and compatibility effect
+      description: Explain any effect on key custody, metadata exposure, protocol v1, dependencies, or migration.
+    validations:
+      required: true
