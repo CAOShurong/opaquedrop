@@ -54,6 +54,23 @@ type cancelAtEOFReadCloser struct {
 	cancel context.CancelFunc
 }
 
+type failAfterNReadCloser struct {
+	io.ReadCloser
+	remaining int
+}
+
+func (r *failAfterNReadCloser) Read(buffer []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	if len(buffer) > r.remaining {
+		buffer = buffer[:r.remaining]
+	}
+	n, err := r.ReadCloser.Read(buffer)
+	r.remaining -= n
+	return n, err
+}
+
 func (r *cancelAtEOFReadCloser) Read(buffer []byte) (int, error) {
 	n, err := r.ReadCloser.Read(buffer)
 	if errors.Is(err, io.EOF) {
@@ -486,8 +503,10 @@ func TestCollectorReportsSavedFileWhenAcknowledgementFails(t *testing.T) {
 	key.ServerURL = f.server.URL
 	client := collector.New(key)
 	base := client.HTTP.Transport
+	ackRequests := 0
 	client.HTTP.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
 		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/ack") {
+			ackRequests++
 			return &http.Response{
 				StatusCode: http.StatusInternalServerError,
 				Status:     "500 Internal Server Error",
@@ -507,6 +526,9 @@ func TestCollectorReportsSavedFileWhenAcknowledgementFails(t *testing.T) {
 	if len(results) != 1 || results[0].UploadID != upload.manifest.UploadID {
 		t.Fatalf("saved result was lost after acknowledgement failure: %+v", results)
 	}
+	if ackRequests != 1 {
+		t.Fatalf("acknowledgement POST attempts = %d, want 1", ackRequests)
+	}
 	if got, err := os.ReadFile(results[0].Path); err != nil || string(got) != "saved before acknowledgement" {
 		t.Fatalf("saved output = %q, %v", got, err)
 	}
@@ -516,6 +538,60 @@ func TestCollectorReportsSavedFileWhenAcknowledgementFails(t *testing.T) {
 	}
 	if len(receipts) != 1 || receipts[0].Acknowledged {
 		t.Fatalf("failed acknowledgement changed receipt state: %+v", receipts)
+	}
+}
+
+func TestCollectorDoesNotReplayAcknowledgementRedirect(t *testing.T) {
+	f := newFixture(t, 1, 1<<20)
+	upload := seal(t, f, "GGGGGGGGGGGGGGGGGGGGGG", []byte("saved before redirect"), "saved.txt", store.MinChunkSize)
+	uploadAll(t, f, upload)
+
+	key := f.key
+	key.ServerURL = f.server.URL
+	client := collector.New(key)
+	base := client.HTTP.Transport
+	ackRequests := 0
+	redirectRequests := 0
+	client.HTTP.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/ack") {
+			ackRequests++
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Status:     "307 Temporary Redirect",
+				Header:     http.Header{"Location": []string{f.server.URL + "/redirected-ack"}},
+				Body:       io.NopCloser(strings.NewReader("redirected")),
+				Request:    request,
+			}, nil
+		}
+		if request.Method == http.MethodPost && request.URL.Path == "/redirected-ack" {
+			redirectRequests++
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Status:     "204 No Content",
+				Header:     make(http.Header),
+				Body:       http.NoBody,
+				Request:    request,
+			}, nil
+		}
+		return base.RoundTrip(request)
+	})
+
+	out := filepath.Join(t.TempDir(), "received")
+	results, collectErr := client.CollectAll(t.Context(), out, true)
+	if collectErr == nil || !strings.Contains(collectErr.Error(), "file saved but acknowledgement failed") {
+		t.Fatalf("acknowledgement redirect error = %v", collectErr)
+	}
+	if len(results) != 1 || results[0].UploadID != upload.manifest.UploadID {
+		t.Fatalf("saved result was lost after acknowledgement redirect: %+v", results)
+	}
+	if ackRequests != 1 || redirectRequests != 0 {
+		t.Fatalf("acknowledgement requests = source %d, redirect %d; want 1, 0", ackRequests, redirectRequests)
+	}
+	if got, err := os.ReadFile(results[0].Path); err != nil || string(got) != "saved before redirect" {
+		t.Fatalf("saved output = %q, %v", got, err)
+	}
+	if receipts, err := client.List(t.Context()); err != nil || len(receipts) != 1 || receipts[0].Acknowledged {
+		t.Fatalf("redirect changed acknowledgement state: %+v, %v", receipts, err)
 	}
 }
 
@@ -588,5 +664,48 @@ func TestCollectorCancellationBeforeFinalizationLeavesNoFinalFile(t *testing.T) 
 	}
 	if len(entries) != 0 {
 		t.Fatalf("canceled collection exposed output: %v", entries)
+	}
+}
+
+func TestCollectorRetriesInterruptedChunkWithoutDuplicatingPlaintext(t *testing.T) {
+	f := newFixture(t, 1, 1<<20)
+	plain := bytes.Repeat([]byte("retry-exactly-once"), 8_000)
+	upload := seal(t, f, "IIIIIIIIIIIIIIIIIIIIII", plain, "retried.bin", store.MinChunkSize)
+	uploadAll(t, f, upload)
+
+	key := f.key
+	key.ServerURL = f.server.URL
+	client := collector.New(key)
+	base := client.HTTP.Transport
+	chunkRequests := make(map[string]int)
+	client.HTTP.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		response, err := base.RoundTrip(request)
+		if err != nil || !strings.Contains(request.URL.Path, "/chunks/") {
+			return response, err
+		}
+		chunkRequests[request.URL.Path]++
+		if strings.HasSuffix(request.URL.Path, "/chunks/1") && chunkRequests[request.URL.Path] == 1 {
+			response.Body = &failAfterNReadCloser{ReadCloser: response.Body, remaining: 17}
+		}
+		return response, nil
+	})
+
+	out := filepath.Join(t.TempDir(), "received")
+	results, collectErr := client.CollectAll(t.Context(), out, true)
+	if collectErr != nil || len(results) != 1 {
+		t.Fatalf("retried collection = %+v, %v", results, collectErr)
+	}
+	got, err := os.ReadFile(results[0].Path)
+	if err != nil || !bytes.Equal(got, plain) {
+		t.Fatalf("retried output mismatch: bytes=%d error=%v", len(got), err)
+	}
+	firstPath := "/api/v1/collect/" + f.bundle.ID + "/uploads/" + upload.manifest.UploadID + "/chunks/0"
+	secondPath := "/api/v1/collect/" + f.bundle.ID + "/uploads/" + upload.manifest.UploadID + "/chunks/1"
+	if chunkRequests[firstPath] != 1 || chunkRequests[secondPath] != 2 {
+		t.Fatalf("chunk request counts = %v", chunkRequests)
+	}
+	entries, _ := os.ReadDir(out)
+	if len(entries) != 1 || strings.HasSuffix(entries[0].Name(), ".part") {
+		t.Fatalf("retry exposed duplicate or partial output: %v", entries)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,8 +23,15 @@ import (
 )
 
 type Client struct {
-	Key  model.KeyFile
-	HTTP *http.Client
+	Key         model.KeyFile
+	HTTP        *http.Client
+	ReadRetries int
+	RetryLog    io.Writer
+
+	retryBaseDelay time.Duration
+	retryMaxDelay  time.Duration
+	sleep          func(context.Context, time.Duration) error
+	now            func() time.Time
 }
 
 type CollectOptions struct {
@@ -33,6 +41,9 @@ type CollectOptions struct {
 }
 
 const (
+	DefaultReadRetries = 3
+	MaxReadRetries     = 10
+
 	maxJSONResponse   = 1 << 20
 	maxListResponse   = 8 << 20
 	maxNameCollisions = 10_000
@@ -45,14 +56,22 @@ func New(key model.KeyFile) *Client {
 		ResponseHeaderTimeout: 30 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	}
-	return &Client{Key: key, HTTP: &http.Client{Transport: transport}}
+	return &Client{
+		Key: key, HTTP: &http.Client{Transport: transport}, ReadRetries: DefaultReadRetries,
+		retryBaseDelay: 250 * time.Millisecond, retryMaxDelay: 30 * time.Second,
+		sleep: sleepContext, now: time.Now,
+	}
 }
 
 func (c *Client) List(ctx context.Context) ([]model.Receipt, error) {
 	var response struct {
 		Uploads []model.Receipt `json:"uploads"`
 	}
-	if err := c.jsonRequestLimit(ctx, http.MethodGet, c.endpoint("/api/v1/collect/%s/uploads", c.Key.RequestID), nil, &response, maxListResponse); err != nil {
+	payload, err := c.bytesRequest(ctx, c.endpoint("/api/v1/collect/%s/uploads", c.Key.RequestID), maxListResponse)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(payload, &response); err != nil {
 		return nil, err
 	}
 	return response.Uploads, nil
@@ -241,27 +260,160 @@ func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir s
 }
 
 func (c *Client) bytesRequest(ctx context.Context, url string, limit int64) ([]byte, error) {
+	retries := c.ReadRetries
+	if retries < 0 {
+		retries = 0
+	}
+	if retries > MaxReadRetries {
+		retries = MaxReadRetries
+	}
+	attempts := retries + 1
+	for attempt := 1; attempt <= attempts; attempt++ {
+		payload, retryAfter, retryable, err := c.bytesRequestOnce(ctx, url, limit)
+		if err == nil {
+			return payload, nil
+		}
+		if !retryable || attempt == attempts || ctx.Err() != nil {
+			return nil, err
+		}
+		maxDelay := c.retryMaxDelay
+		if maxDelay <= 0 {
+			maxDelay = 30 * time.Second
+		}
+		if retryAfter > maxDelay {
+			return nil, fmt.Errorf("%w (Retry-After %s exceeds maximum automatic wait %s)", err, retryAfter, maxDelay)
+		}
+		delay := c.retryDelay(attempt)
+		if retryAfter > delay {
+			delay = retryAfter
+		}
+		if c.RetryLog != nil {
+			fmt.Fprintf(c.RetryLog, "read attempt %d/%d failed: %v; retrying in %s\n", attempt, attempts, err, delay)
+		}
+		sleep := c.sleep
+		if sleep == nil {
+			sleep = sleepContext
+		}
+		if err := sleep(ctx, delay); err != nil {
+			return nil, err
+		}
+	}
+	return nil, errors.New("read retry loop exhausted")
+}
+
+func (c *Client) bytesRequestOnce(ctx context.Context, url string, limit int64) ([]byte, time.Duration, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	req.Header.Set("Authorization", "OpaqueDrop "+c.Key.CollectToken)
 	response, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, ctx.Err() == nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, responseError(response)
+		retryAfter, _ := parseRetryAfter(response.Header.Get("Retry-After"), c.currentTime())
+		return nil, retryAfter, retryableReadStatus(response.StatusCode), responseError(response)
 	}
-	b, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if response.ContentLength > limit {
+		return nil, 0, false, errors.New("server response exceeds protocol limit")
+	}
+	payload, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
-		return nil, err
+		return nil, 0, ctx.Err() == nil, err
 	}
-	if int64(len(b)) > limit {
-		return nil, errors.New("server response exceeds protocol limit")
+	if int64(len(payload)) > limit {
+		return nil, 0, false, errors.New("server response exceeds protocol limit")
 	}
-	return b, nil
+	return payload, 0, false, nil
+}
+
+func (c *Client) retryDelay(failedAttempt int) time.Duration {
+	delay := c.retryBaseDelay
+	if delay < 0 {
+		delay = 0
+	}
+	maxDelay := c.retryMaxDelay
+	if maxDelay <= 0 {
+		maxDelay = 30 * time.Second
+	}
+	for i := 1; i < failedAttempt; i++ {
+		if delay >= maxDelay/2 {
+			return maxDelay
+		}
+		delay *= 2
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
+func (c *Client) currentTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func retryableReadStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if decimalDigits(value) {
+		seconds, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || seconds > uint64((time.Duration(1<<63-1))/time.Second) {
+			return time.Duration(1<<63 - 1), true
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	delay := when.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	return delay, true
+}
+
+func decimalDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Client) jsonRequest(ctx context.Context, method, url string, body io.Reader, target any) error {
@@ -277,7 +429,15 @@ func (c *Client) jsonRequestLimit(ctx context.Context, method, url string, body 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	response, err := c.HTTP.Do(req)
+	client := c.HTTP
+	if client == nil {
+		client = http.DefaultClient
+	}
+	requestClient := *client
+	requestClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	response, err := requestClient.Do(req)
 	if err != nil {
 		return err
 	}

@@ -59,6 +59,20 @@ The selected behavior follows established batch-transfer contracts rather than i
 
 OpaqueDrop v0.3.0 keeps sequential processing and adds explicit selection and fail-fast controls. Per-submission cryptographic/protocol failures are isolated, successful files retain verify-sync-atomic-publish-ack ordering, shared output-filesystem failures stop immediately, and any partial failure still produces a nonzero process exit. A standard-library hard-link publish removes the old check-then-rename collision race without adding a dependency; unsupported destination filesystems fail closed. There is no state migration or wire-format change.
 
+## Operational follow-up: bounded collector read retries
+
+Before v0.4.0, list, manifest, and every ciphertext chunk GET had one application-level attempt. Go's HTTP transport only retries a narrow class of failures on reused connections, so a truncated body or temporary proxy response near the end of a large collection deleted the temporary output; the next command restarted that file at chunk zero. This is a real self-hosted large-transfer failure class, not an OpaqueDrop adoption claim:
+
+- [rclone's official low-level retry contract](https://rclone.org/docs/#low-level-retries-int) treats one failing API or HTTP operation as the retry unit, separate from whole-transfer retries.
+- [rsync's maintained manual](https://man7.org/linux/man-pages/man1/rsync.1.html) provides `--partial`/`--partial-dir` specifically to avoid losing long-transfer progress.
+- [Copyparty](https://github.com/9001/copyparty) makes resumable browser upload and download a core feature while remaining an MIT-licensed, low-dependency server.
+- A [self-hosted practitioner report](https://www.reddit.com/r/selfhosted/comments/1hrdy16/nginx_proxy_hosts_large_file_download/) describes large downloads from several services failing behind nginx while direct access succeeds. [Nextcloud issue #49529](https://github.com/nextcloud/server/issues/49529) records the same proxy/direct distinction with 504s and stalls. These reports establish the operating failure, not its prevalence.
+- [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#name-idempotent-methods) explains why idempotent reads can be repeated after communication failure, while [Go's transport documentation](https://pkg.go.dev/net/http#Transport) makes clear that its built-in retry coverage is deliberately narrower than full response-body recovery.
+
+OpaqueDrop v0.4.0 reuses the existing authenticated chunk boundary: a failed GET attempt returns no bytes to the decrypt/write loop, while a complete retry contributes that chunk once and leaves previous chunks untouched. Retries are bounded, context-cancellable, observable on stderr, and limited to transport/body failures plus temporary HTTP statuses. Invalid JSON, protocol/authentication failures, and response-limit errors remain single-attempt. Acknowledgement POST is deliberately sent once without following redirects because delete-after-collect removes the state needed to distinguish a successful request with a lost response from a request that never succeeded.
+
+This adds no dependency, server state, migration, range protocol, persisted key material, parallel transfer, or wire-format change. rclone and Copyparty offer more mature general transfer recovery but expose plaintext to their server workflows; rsync requires compatible software at both ends; Gokapi, Nextcloud, and SFTPGo retain the broader deployment and migration tradeoffs in the alternatives table above. Persistent resume remains a separate design decision rather than being implied by these bounded request retries.
+
 ## Reuse and protocol choices
 
 The project uses only platform primitives rather than introducing a cryptographic library or custom cipher:

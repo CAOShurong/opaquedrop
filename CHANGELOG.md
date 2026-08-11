@@ -4,6 +4,20 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-11
+
+### Added
+
+- `collect --read-retries N` (default 3, maximum 10) for bounded retries after temporary list, manifest, or chunk GET failures.
+- Context-aware exponential read backoff, retry diagnostics on stderr, and `Retry-After` handling up to a 30-second automatic-wait limit.
+- Portable interrupt handling so Ctrl+C cancels an in-flight collection or retry wait before final publication.
+
+### Changed
+
+- A truncated chunk response or temporary 408/425/429/500/502/503/504 now retries only that read; completed earlier chunks are not downloaded or written again.
+- Invalid JSON, manifest/ciphertext authentication failures, response-limit violations, and permanent HTTP errors are not retried.
+- Acknowledgement POST remains single-shot and refuses redirects because delete-after-collect requests do not yet have persistent idempotency tombstones.
+
 ## [0.3.0] - 2026-08-11
 
 ### Added
@@ -48,7 +62,8 @@ All notable changes are documented here.
 - Deterministic browser WebCrypto ↔ Go test vector and adversarial corruption/reordering tests.
 - Embedded responsive upload UI and dependency-free release binaries.
 
-[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/CAOShurong/opaquedrop/releases/tag/v0.1.0
