@@ -1,6 +1,6 @@
 # OpaqueDrop protocol v1
 
-Status: implemented by OpaqueDrop v0.1.x. This format is versioned but has not been independently audited.
+Status: implemented by OpaqueDrop v0.1.0 and later. This format is versioned but has not been independently audited.
 
 ## Encoding
 
@@ -110,6 +110,12 @@ receipt_sha256 = SHA256(
 ```
 
 The browser independently computes and compares this value. The collector recomputes it after downloading ciphertext and compares it with the completion receipt before finalizing output.
+
+## Same-tab transfer replay
+
+Transfer recovery does not change the cryptographic format. A repeated manifest setup must contain the exact same request body and upload ID; the server accepts it only when the existing manifest, server state, and chunks directory match that upload. Different bytes under the same upload ID are a conflict.
+
+Each repeated chunk PUT contains the same ciphertext. If the server reports that the chunk already exists, an authenticated HEAD request returns its SHA-256 digest and the browser advances only when that digest matches its local ciphertext. Repeating completion returns the already persisted receipt. These rules support bounded retries while the page remains open; they do not persist the ephemeral file key or provide resume after reload.
 
 ## Cross-implementation vector
 

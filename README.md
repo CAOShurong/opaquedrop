@@ -75,7 +75,7 @@ Share the printed upload link. After files arrive, collect and authenticate them
 opaquedrop collect --key ./family-photos.key.json --out ./received
 ```
 
-The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically publishes it without replacing an existing name, and only then acknowledges collection. A damaged or malicious submission is reported by upload ID but does not block later healthy submissions; any failure still makes the command exit nonzero. Temporary list, manifest, and chunk GET failures retry three times by default, so one interrupted chunk does not restart the current file. Use repeatable `--upload ID` for an explicit subset, `--fail-fast` for first-error automation, or `--read-retries 0` to disable read retries.
+The upload page retries a temporarily interrupted setup, chunk, or completion request three times while that page remains open. The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically publishes it without replacing an existing name, and only then acknowledges collection. A damaged or malicious submission is reported by upload ID but does not block later healthy submissions; any failure still makes the command exit nonzero. Temporary list, manifest, and chunk GET failures retry three times by default, so one interrupted chunk does not restart the current file. Use repeatable `--upload ID` for an explicit subset, `--fail-fast` for first-error automation, or `--read-retries 0` to disable read retries.
 
 ## Keep the recipient key off the server
 
@@ -104,6 +104,7 @@ The public bundle contains a P-256 public key and SHA-256 hashes of two independ
 - Corrupted, reordered, and missing chunks fail without a completed output file.
 - A corrupted completed submission remains unacknowledged and produces no final file, while later healthy submissions are still verified, saved, reported, and acknowledged; partial collection exits nonzero.
 - Truncated and temporary-error GET attempts are discarded before decryption or writing; only a complete bounded response can contribute one chunk to the output, and acknowledgement POST is never automatically replayed.
+- Browser upload retries reuse the exact same manifest, ciphertext, and completion identity. An already-stored chunk advances only after its SHA-256 digest matches; a different manifest under the same upload ID remains a conflict.
 - Manifest bodies are limited to 64 KiB; ciphertext chunks are limited to 8 MiB; the shipped browser uses 1 MiB chunks.
 - Request file and byte quotas count incomplete reservations, closing the obvious concurrent-overcommit path.
 - Capability tokens arrive only in an `Authorization` header, are stored only as hashes, and are not logged.
@@ -146,7 +147,7 @@ OpaqueDrop defaults to `127.0.0.1:8080`. Public Web Crypto requires HTTPS. The [
 
 ## Browser support
 
-The upload page uses browser-native ECDH P-256, HKDF-SHA256, and AES-GCM through Web Crypto. It requires a secure context (HTTPS or localhost) and a modern Chromium, Firefox, or Safari browser. Files are processed one 1 MiB chunk at a time; the page does not offer cross-reload resume because the ephemeral file key is intentionally not persisted.
+The upload page uses browser-native ECDH P-256, HKDF-SHA256, and AES-GCM through Web Crypto. It requires a secure context (HTTPS or localhost) and a modern Chromium, Firefox, or Safari browser. Files are processed one 1 MiB chunk at a time. Network failures and temporary 408/425/429/500/502/503/504 responses use three bounded same-tab retries; `Retry-After` is honored only through 30 seconds. The page does not offer cross-reload resume because the ephemeral file key is intentionally not persisted.
 
 ## Contributing and security reports
 

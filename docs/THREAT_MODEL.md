@@ -73,6 +73,7 @@ The 64-bit nonce prefix does not need to be globally collision-free because ever
 - Manifests are capped at 64 KiB.
 - Accepted chunk sizes are 64 KiB through 8 MiB; the browser uses 1 MiB.
 - Chunk uploads go to a private temporary file and rename into place only after the exact declared length is received.
+- Browser upload retries reuse the same in-memory key and ciphertext. Exact manifest replay succeeds only against a complete matching server-side upload shape, a stored chunk is accepted only after its digest matches, and different manifest bytes under the same upload ID remain a conflict.
 - Completion validates every expected chunk and length, computes the receipt, writes a temporary marker, syncs it, and atomically renames it to `complete.json`.
 - Collection decrypts one bounded chunk at a time into a private temporary output file, verifies the receipt and total length, checks cancellation, syncs the file, and atomically publishes a no-replace hard link under a sanitized, component-bounded basename.
 - Automatic retries apply only to read-only GET operations. An incomplete or temporary-error attempt is fully discarded before decryption or writing, so a successful retry cannot duplicate plaintext; acknowledgement POST is sent once and redirects are not followed.
@@ -81,4 +82,4 @@ The 64-bit nonce prefix does not need to be globally collision-free because ever
 
 ## Residual-risk decisions
 
-Server-side antivirus and preview are intentionally incompatible with the server-blind goal. Retention defaults to keeping ciphertext after acknowledgement until the operator runs expiry cleanup; immediate deletion is opt-in. The first release intentionally avoids resumable-across-reload browser keys because persisting an ephemeral file key expands the browser secret-storage surface.
+Server-side antivirus and preview are intentionally incompatible with the server-blind goal. Retention defaults to keeping ciphertext after acknowledgement until the operator runs expiry cleanup; immediate deletion is opt-in. Same-tab upload retries keep the ephemeral file key only in memory; resumable-across-reload browser keys remain intentionally unsupported because persistence expands the browser secret-storage surface.
