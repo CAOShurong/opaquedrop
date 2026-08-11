@@ -44,7 +44,20 @@ This is a documented operational failure pattern, not a hypothetical feature req
 - [ntfy's proxy documentation](https://github.com/binwiederhier/ntfy/blob/main/docs/config.md#behind-a-proxy-tls-etc) warns that without proxy-aware visitor identity all users are rate-limited as one, and supports trusted proxy hosts for multi-hop chains.
 - [Nextcloud's reverse-proxy configuration](https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/reverse_proxy_configuration.html) similarly limits forwarded client-IP trust to configured proxies and warns that incorrect headers enable IP spoofing.
 
-OpaqueDrop v0.2.0 adopts that established boundary without adding a dependency: `--trusted-proxy` is opt-in and repeatable, the direct peer must match, `X-Forwarded-For` is walked from the nearest hop toward the client, and malformed chains fall back to the peer. A constant-size limiter table prevents newly distinguished source addresses from causing unbounded retained state. This improves fairness behind a proxy; it does not claim to prevent DDoS or abuse by someone who already holds a valid submit capability.
+OpaqueDrop v0.2.0 adopts that established boundary without adding a dependency: `--trusted-proxy` is opt-in and repeatable, the direct peer must match, and `X-Forwarded-For` is walked from the nearest hop toward the client. A malformed hop in the trusted suffix falls back to the peer; untrusted text farther toward the origin is ignored once the first valid non-trusted client address has been selected. A constant-size limiter table prevents newly distinguished source addresses from causing unbounded retained state. This improves fairness behind a proxy; it does not claim to prevent DDoS or abuse by someone who already holds a valid submit capability.
+
+## Operational follow-up: isolate collection failures
+
+The server can validate upload shape, lengths, and an exact ciphertext receipt, but it intentionally cannot prove that ciphertext authenticates under the off-host recipient key. A submit-capability holder can therefore complete a structurally valid poisoned upload. Before v0.3.0, the collector stopped at the first such item and the CLI suppressed any earlier successful results, so one old bad record could indefinitely block every later healthy submission.
+
+The selected behavior follows established batch-transfer contracts rather than inventing a new protocol:
+
+- [rclone's maintained documentation](https://rclone.org/docs/) says it accumulates per-file errors while running and exits nonzero only after retries if transfers still failed. [Issue #4670](https://github.com/rclone/rclone/issues/4670) requests an optional early-stop threshold, confirming that keep-going is deliberate default behavior.
+- [rsync](https://man7.org/linux/man-pages/man1/rsync.1.html) reserves exit status 23 for partial transfer due to error instead of representing partial work as full success.
+- [Gokapi File Requests](https://gokapi.readthedocs.io/en/latest/usage.html) provides both individual downloads and a batch archive, giving operators an item-level escape path.
+- A [Nextcloud practitioner request](https://www.reddit.com/r/NextCloud/comments/1ei3lo7/how_to_make_nextcloud_macos_app_skip_a_file_if/) describes the same operational need to skip an errored item and continue later files. This is anecdotal evidence, not a prevalence estimate.
+
+OpaqueDrop v0.3.0 keeps sequential processing and adds explicit selection and fail-fast controls. Per-submission cryptographic/protocol failures are isolated, successful files retain verify-sync-atomic-publish-ack ordering, shared output-filesystem failures stop immediately, and any partial failure still produces a nonzero process exit. A standard-library hard-link publish removes the old check-then-rename collision race without adding a dependency; unsupported destination filesystems fail closed. There is no state migration or wire-format change.
 
 ## Reuse and protocol choices
 

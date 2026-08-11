@@ -99,6 +99,16 @@ uploads/<request-id>/<upload-id>/
 
 The recipient key file is a separate backup asset and is more sensitive than server data. Back it up through a recipient-controlled encrypted system. A server backup without that key preserves availability of ciphertext but not decryption capability.
 
+## Collection failures and recovery
+
+`opaquedrop collect` verifies submissions sequentially. A per-submission authentication, corruption, or protocol failure is reported with the public upload ID; that submission is not acknowledged and no final output file is exposed. Later healthy submissions are still processed. The overall command exits nonzero if any item failed, even when some files were successfully saved.
+
+Use `--fail-fast` for automation that must stop at the first item failure. Use repeatable `--upload UPLOAD_ID` to collect only named completed submissions; this can intentionally re-collect an acknowledged upload while its ciphertext is retained. Output-directory creation, writes, sync, close, or atomic publication failures stop the batch immediately because they indicate a shared destination problem rather than an isolated upload.
+
+The collector publishes a fully verified temporary file with a same-directory hard link. This gives no-replace atomicity even when multiple collectors choose the same decrypted name; existing names receive a bounded numeric suffix and are never overwritten. The destination filesystem must support hard links. Common local NTFS, ext4, APFS, and similar filesystems do; a filesystem or network share that rejects hard links fails closed with no final file and should be replaced by a supported staging directory.
+
+OpaqueDrop does not automatically delete or acknowledge a failed submission. Retaining it preserves evidence and avoids turning a decryption error into destructive server action. Operators can let request expiry remove it or investigate the upload ID before cleanup.
+
 ## Cleanup
 
 Preview expired requests and incomplete uploads older than 24 hours:

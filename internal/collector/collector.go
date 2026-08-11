@@ -26,6 +26,18 @@ type Client struct {
 	HTTP *http.Client
 }
 
+type CollectOptions struct {
+	Acknowledge bool
+	UploadIDs   []string
+	FailFast    bool
+}
+
+const (
+	maxJSONResponse   = 1 << 20
+	maxListResponse   = 8 << 20
+	maxNameCollisions = 10_000
+)
+
 func New(key model.KeyFile) *Client {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -40,29 +52,85 @@ func (c *Client) List(ctx context.Context) ([]model.Receipt, error) {
 	var response struct {
 		Uploads []model.Receipt `json:"uploads"`
 	}
-	if err := c.jsonRequest(ctx, http.MethodGet, c.endpoint("/api/v1/collect/%s/uploads", c.Key.RequestID), nil, &response); err != nil {
+	if err := c.jsonRequestLimit(ctx, http.MethodGet, c.endpoint("/api/v1/collect/%s/uploads", c.Key.RequestID), nil, &response, maxListResponse); err != nil {
 		return nil, err
 	}
 	return response.Uploads, nil
 }
 
 func (c *Client) CollectAll(ctx context.Context, outDir string, acknowledge bool) ([]model.CollectResult, error) {
+	return c.Collect(ctx, outDir, CollectOptions{Acknowledge: acknowledge})
+}
+
+func (c *Client) Collect(ctx context.Context, outDir string, options CollectOptions) ([]model.CollectResult, error) {
 	receipts, err := c.List(ctx)
 	if err != nil {
 		return nil, err
 	}
+	receipts, selectionErrors := selectReceipts(receipts, options.UploadIDs)
 	results := make([]model.CollectResult, 0)
+	failures := append([]error(nil), selectionErrors...)
+	if options.FailFast && len(failures) > 0 {
+		return results, errors.Join(failures...)
+	}
 	for _, receipt := range receipts {
-		if receipt.Acknowledged {
+		result, err := c.CollectOne(ctx, receipt, outDir, options.Acknowledge)
+		if result.Path != "" {
+			results = append(results, result)
+		}
+		if err != nil {
+			failures = append(failures, fmt.Errorf("collect upload %s: %w", receipt.UploadID, err))
+			var outputErr *outputError
+			if options.FailFast || errors.As(err, &outputErr) || ctx.Err() != nil {
+				return results, errors.Join(failures...)
+			}
+		}
+	}
+	return results, errors.Join(failures...)
+}
+
+type outputError struct {
+	Err error
+}
+
+func (e *outputError) Error() string { return e.Err.Error() }
+func (e *outputError) Unwrap() error { return e.Err }
+
+func selectReceipts(receipts []model.Receipt, uploadIDs []string) ([]model.Receipt, []error) {
+	if len(uploadIDs) == 0 {
+		selected := make([]model.Receipt, 0, len(receipts))
+		for _, receipt := range receipts {
+			if !receipt.Acknowledged {
+				selected = append(selected, receipt)
+			}
+		}
+		return selected, nil
+	}
+
+	byID := make(map[string]model.Receipt, len(receipts))
+	for _, receipt := range receipts {
+		byID[receipt.UploadID] = receipt
+	}
+	selected := make([]model.Receipt, 0, len(uploadIDs))
+	failures := make([]error, 0)
+	seen := make(map[string]struct{}, len(uploadIDs))
+	for _, uploadID := range uploadIDs {
+		if _, duplicate := seen[uploadID]; duplicate {
 			continue
 		}
-		result, err := c.CollectOne(ctx, receipt, outDir, acknowledge)
-		if err != nil {
-			return results, fmt.Errorf("collect upload %s: %w", receipt.UploadID, err)
+		seen[uploadID] = struct{}{}
+		if !core.ValidID(uploadID) {
+			failures = append(failures, fmt.Errorf("invalid upload ID %q", uploadID))
+			continue
 		}
-		results = append(results, result)
+		receipt, ok := byID[uploadID]
+		if !ok {
+			failures = append(failures, fmt.Errorf("upload %s is not a completed submission", uploadID))
+			continue
+		}
+		selected = append(selected, receipt)
 	}
-	return results, nil
+	return selected, failures
 }
 
 func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir string, acknowledge bool) (model.CollectResult, error) {
@@ -90,11 +158,11 @@ func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir s
 		return model.CollectResult{}, err
 	}
 	if err := prepareOutputDir(outDir); err != nil {
-		return model.CollectResult{}, err
+		return model.CollectResult{}, &outputError{Err: err}
 	}
 	temp, err := os.CreateTemp(outDir, ".opaquedrop-*.part")
 	if err != nil {
-		return model.CollectResult{}, err
+		return model.CollectResult{}, &outputError{Err: err}
 	}
 	tempPath := temp.Name()
 	defer os.Remove(tempPath)
@@ -106,6 +174,10 @@ func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir s
 		chunkURL := c.endpoint("/api/v1/collect/%s/uploads/%s/chunks/%d", c.Key.RequestID, receipt.UploadID, i)
 		ciphertext, err := c.bytesRequest(ctx, chunkURL, manifest.ChunkSize+17)
 		if err != nil {
+			temp.Close()
+			return model.CollectResult{}, err
+		}
+		if err := ctx.Err(); err != nil {
 			temp.Close()
 			return model.CollectResult{}, err
 		}
@@ -123,7 +195,7 @@ func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir s
 		}
 		if _, err := temp.Write(plain); err != nil {
 			temp.Close()
-			return model.CollectResult{}, err
+			return model.CollectResult{}, &outputError{Err: err}
 		}
 		_, _ = plainHash.Write(plain)
 		written += int64(len(plain))
@@ -137,27 +209,35 @@ func (c *Client) CollectOne(ctx context.Context, receipt model.Receipt, outDir s
 		temp.Close()
 		return model.CollectResult{}, errors.New("receipt hash does not match stored ciphertext")
 	}
-	if err := temp.Sync(); err != nil {
+	if err := ctx.Err(); err != nil {
 		temp.Close()
 		return model.CollectResult{}, err
 	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return model.CollectResult{}, &outputError{Err: err}
+	}
 	if err := temp.Close(); err != nil {
+		return model.CollectResult{}, &outputError{Err: err}
+	}
+	if err := ctx.Err(); err != nil {
 		return model.CollectResult{}, err
 	}
-	destination := uniqueDestination(outDir, core.SafeFilename(metadata.Name))
-	if err := os.Rename(tempPath, destination); err != nil {
-		return model.CollectResult{}, err
+	destination, err := publishOutput(tempPath, outDir, core.SafeFilename(metadata.Name))
+	if err != nil {
+		return model.CollectResult{}, &outputError{Err: err}
+	}
+	result := model.CollectResult{
+		UploadID: receipt.UploadID, Path: destination, PlainBytes: written,
+		PlainSHA256: hex.EncodeToString(plainHash.Sum(nil)), ReceiptSHA256: computedReceipt,
 	}
 	if acknowledge {
 		ackURL := c.endpoint("/api/v1/collect/%s/uploads/%s/ack", c.Key.RequestID, receipt.UploadID)
 		if err := c.jsonRequest(ctx, http.MethodPost, ackURL, bytes.NewReader([]byte("{}")), nil); err != nil {
-			return model.CollectResult{}, fmt.Errorf("file saved but acknowledgement failed: %w", err)
+			return result, fmt.Errorf("file saved but acknowledgement failed: %w", err)
 		}
 	}
-	return model.CollectResult{
-		UploadID: receipt.UploadID, Path: destination, PlainBytes: written,
-		PlainSHA256: hex.EncodeToString(plainHash.Sum(nil)), ReceiptSHA256: computedReceipt,
-	}, nil
+	return result, nil
 }
 
 func (c *Client) bytesRequest(ctx context.Context, url string, limit int64) ([]byte, error) {
@@ -185,6 +265,10 @@ func (c *Client) bytesRequest(ctx context.Context, url string, limit int64) ([]b
 }
 
 func (c *Client) jsonRequest(ctx context.Context, method, url string, body io.Reader, target any) error {
+	return c.jsonRequestLimit(ctx, method, url, body, target, maxJSONResponse)
+}
+
+func (c *Client) jsonRequestLimit(ctx context.Context, method, url string, body io.Reader, target any, limit int64) error {
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return err
@@ -204,7 +288,14 @@ func (c *Client) jsonRequest(ctx context.Context, method, url string, body io.Re
 	if target == nil || response.StatusCode == http.StatusNoContent {
 		return nil
 	}
-	return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(target)
+	payload, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(payload)) > limit {
+		return errors.New("server response exceeds protocol limit")
+	}
+	return json.Unmarshal(payload, target)
 }
 
 func responseError(response *http.Response) error {
@@ -240,14 +331,23 @@ func prepareOutputDir(path string) error {
 	return nil
 }
 
-func uniqueDestination(dir, name string) string {
+func publishOutput(tempPath, dir, name string) (string, error) {
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
-	candidate := filepath.Join(dir, name)
-	for i := 2; ; i++ {
-		if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
-			return candidate
+	for attempt := 1; attempt <= maxNameCollisions; attempt++ {
+		candidateName := name
+		if attempt > 1 {
+			candidateName = fmt.Sprintf("%s-%d%s", base, attempt, ext)
 		}
-		candidate = filepath.Join(dir, fmt.Sprintf("%s-%d%s", base, i, ext))
+		candidate := filepath.Join(dir, candidateName)
+		if err := os.Link(tempPath, candidate); err == nil {
+			_ = os.Remove(tempPath)
+			return candidate, nil
+		} else if errors.Is(err, os.ErrExist) {
+			continue
+		} else {
+			return "", err
+		}
 	}
+	return "", fmt.Errorf("refusing more than %d filename collision attempts", maxNameCollisions)
 }

@@ -119,11 +119,78 @@ func SafeFilename(name string) string {
 	if name == "" || name == "." || name == ".." {
 		name = "received-file"
 	}
-	runes := []rune(name)
-	if len(runes) > 180 {
-		name = string(runes[:180])
+	if windowsDeviceName(name) {
+		name = "_" + name
 	}
-	return name
+	return truncateFilenameComponent(name)
+}
+
+const (
+	maxFilenameBytes      = 240
+	maxFilenameUTF16Units = 240
+	maxExtensionBytes     = 40
+	maxExtensionUTF16     = 40
+)
+
+func windowsDeviceName(name string) bool {
+	stem := name
+	if dot := strings.IndexByte(stem, '.'); dot >= 0 {
+		stem = stem[:dot]
+	}
+	stem = strings.ToUpper(strings.TrimRight(stem, " ."))
+	if stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" {
+		return true
+	}
+	runes := []rune(stem)
+	if len(runes) != 4 || (!strings.HasPrefix(stem, "COM") && !strings.HasPrefix(stem, "LPT")) {
+		return false
+	}
+	return (runes[3] >= '1' && runes[3] <= '9') || runes[3] == '\u00b9' || runes[3] == '\u00b2' || runes[3] == '\u00b3'
+}
+
+func truncateFilenameComponent(name string) string {
+	extension := filepath.Ext(name)
+	if extension == name {
+		extension = ""
+	}
+	stem := strings.TrimSuffix(name, extension)
+	extension = truncateUnits(extension, maxExtensionBytes, maxExtensionUTF16)
+	stem = truncateUnits(stem, maxFilenameBytes-len([]byte(extension)), maxFilenameUTF16Units-utf16Units(extension))
+	if stem == "" {
+		stem = truncateUnits("received-file", maxFilenameBytes-len([]byte(extension)), maxFilenameUTF16Units-utf16Units(extension))
+	}
+	return stem + extension
+}
+
+func truncateUnits(value string, maxBytes, maxUTF16 int) string {
+	bytesUsed := 0
+	unitsUsed := 0
+	end := 0
+	for offset, r := range value {
+		byteCount := len(string(r))
+		unitCount := 1
+		if r > 0xffff {
+			unitCount = 2
+		}
+		if bytesUsed+byteCount > maxBytes || unitsUsed+unitCount > maxUTF16 {
+			break
+		}
+		bytesUsed += byteCount
+		unitsUsed += unitCount
+		end = offset + byteCount
+	}
+	return value[:end]
+}
+
+func utf16Units(value string) int {
+	units := 0
+	for _, r := range value {
+		units++
+		if r > 0xffff {
+			units++
+		}
+	}
+	return units
 }
 
 func MarshalPretty(v any) ([]byte, error) {

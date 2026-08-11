@@ -11,3 +11,10 @@ func TestServeRejectsInvalidTrustedProxyBeforeStartup(t *testing.T) {
 		t.Fatalf("serve error = %v", err)
 	}
 }
+
+func TestCollectRejectsInvalidUploadIDBeforeReadingKey(t *testing.T) {
+	err := run([]string{"collect", "--key", "missing.json", "--upload", "../unsafe"})
+	if err == nil || !strings.Contains(err.Error(), "invalid upload ID") {
+		t.Fatalf("collect error = %v", err)
+	}
+}

@@ -39,6 +39,7 @@ OpaqueDrop is server-blind under a specific, limited trust model. It does not us
 - A compromised uploader or recipient endpoint, browser extension, screen recorder, keylogger, or malware.
 - Traffic-analysis privacy. IP addresses, timing, request labels, declared sizes, chunk counts, and total ciphertext sizes remain observable. Reverse proxies may log more.
 - Availability against a submit-link holder. Quotas bound disk commitment, but the token holder can consume those quotas. `purge` recovers stale incomplete reservations.
+- A submit-link holder can complete ciphertext that is structurally acceptable to the server but fails recipient-side authentication. Collection reports that upload ID, leaves it unacknowledged, and continues with later healthy submissions; it does not treat the poisoned item as plaintext or delete it automatically.
 - Uploader anonymity. OpaqueDrop is not SecureDrop or OnionShare.
 - Malware safety. The server cannot scan ciphertext. The collector never auto-opens a file, but the recipient must scan or sandbox it.
 - Key recovery. Losing the recipient key makes ciphertext unrecoverable by design.
@@ -73,8 +74,9 @@ The 64-bit nonce prefix does not need to be globally collision-free because ever
 - Accepted chunk sizes are 64 KiB through 8 MiB; the browser uses 1 MiB.
 - Chunk uploads go to a private temporary file and rename into place only after the exact declared length is received.
 - Completion validates every expected chunk and length, computes the receipt, writes a temporary marker, syncs it, and atomically renames it to `complete.json`.
-- Collection decrypts one bounded chunk at a time into a private temporary output file, verifies the receipt and total length, syncs the file, and atomically renames it to a sanitized basename.
+- Collection decrypts one bounded chunk at a time into a private temporary output file, verifies the receipt and total length, checks cancellation, syncs the file, and atomically publishes a no-replace hard link under a sanitized, component-bounded basename.
 - A missing, corrupted, reordered, or header-mismatched upload leaves no completed recipient file.
+- A failed completed upload cannot prevent later healthy submissions in the same request from being collected. Partial success still returns a nonzero CLI exit so automation cannot mistake the batch for wholly successful.
 
 ## Residual-risk decisions
 

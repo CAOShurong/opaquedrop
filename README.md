@@ -75,7 +75,7 @@ Share the printed upload link. After files arrive, collect and authenticate them
 opaquedrop collect --key ./family-photos.key.json --out ./received
 ```
 
-The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically renames it to a sanitized basename, and only then acknowledges collection.
+The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically publishes it without replacing an existing name, and only then acknowledges collection. A damaged or malicious submission is reported by upload ID but does not block later healthy submissions; any failure still makes the command exit nonzero. Use repeatable `--upload ID` for an explicit subset or `--fail-fast` when automation should stop on the first per-submission error.
 
 ## Keep the recipient key off the server
 
@@ -102,14 +102,15 @@ The public bundle contains a P-256 public key and SHA-256 hashes of two independ
 - An 8-byte random nonce prefix plus a big-endian chunk counter makes every nonce unique under that file key; `0xffffffff` is reserved for encrypted metadata.
 - A SHA-256 header binding is authenticated as AES-GCM associated data for metadata and every chunk.
 - Corrupted, reordered, and missing chunks fail without a completed output file.
+- A corrupted completed submission remains unacknowledged and produces no final file, while later healthy submissions are still verified, saved, reported, and acknowledged; partial collection exits nonzero.
 - Manifest bodies are limited to 64 KiB; ciphertext chunks are limited to 8 MiB; the shipped browser uses 1 MiB chunks.
 - Request file and byte quotas count incomplete reservations, closing the obvious concurrent-overcommit path.
 - Capability tokens arrive only in an `Authorization` header, are stored only as hashes, and are not logged.
 - Forwarded client IPs affect only the small invalid-capability limiter, and only when the direct peer matches an explicitly configured trusted-proxy CIDR; the limiter retains at most 4,096 active buckets.
 - Cross-site API requests are rejected; the browser capability starts in the URL fragment, moves to session storage, and is removed from the address bar.
-- Server completion markers and collector outputs use same-filesystem atomic rename.
+- Server completion markers use same-filesystem atomic rename; collector outputs use an atomic no-replace hard-link publish after verification and sync.
 - Request and upload identifiers are allowlisted and reduced to basename components before storage paths are constructed.
-- Decrypted names are reduced to a basename, platform-dangerous characters are replaced, collisions are suffixed, and the output directory cannot be a symlink.
+- Decrypted names are reduced to a basename, platform-dangerous/reserved names are replaced, UTF-8 and UTF-16 component lengths are bounded, collisions are atomically suffixed, and the output directory cannot be a symlink.
 
 These checks are evidence about this implementation, not a substitute for an independent security review. The exact [wire and storage format](docs/PROTOCOL.md) and [committed test vector](testdata/protocol-v1.json) are public.
 
@@ -133,6 +134,8 @@ opaquedrop version    Print the build version
 ```
 
 `purge` is a dry run unless `--apply` is supplied. A request can opt into deleting server ciphertext immediately after a verified collector acknowledgement with `--delete-after-collect`; the default keeps it until expiry cleanup so a recipient can recover from a local mistake.
+
+`collect` processes unacknowledged submissions in completion order. It keeps going after a per-submission authentication or protocol failure, but stops immediately for cancellation, `--fail-fast`, or an output-filesystem error. An explicitly selected acknowledged upload may be collected again when retained ciphertext is still available.
 
 ## Deployment
 

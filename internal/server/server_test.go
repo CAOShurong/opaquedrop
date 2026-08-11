@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -11,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -39,6 +41,25 @@ type fixture struct {
 	submitToken string
 	server      *httptest.Server
 	logs        *bytes.Buffer
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type cancelAtEOFReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r *cancelAtEOFReadCloser) Read(buffer []byte) (int, error) {
+	n, err := r.ReadCloser.Read(buffer)
+	if errors.Is(err, io.EOF) {
+		r.cancel()
+	}
+	return n, err
 }
 
 type sealedUpload struct {
@@ -388,4 +409,184 @@ func TestMissingCorruptedAndReorderedChunksFail(t *testing.T) {
 			t.Fatalf("reordered collection error = %v", err)
 		}
 	})
+}
+
+func TestCollectorContinuesAfterCorruptedSubmission(t *testing.T) {
+	f := newFixture(t, 2, 1<<20)
+	corrupted := seal(t, f, "AAAAAAAAAAAAAAAAAAAAAA", bytes.Repeat([]byte("broken"), 20_000), "corrupted.bin", store.MinChunkSize)
+	healthyPlain := bytes.Repeat([]byte("healthy"), 20_000)
+	healthy := seal(t, f, "BBBBBBBBBBBBBBBBBBBBBB", healthyPlain, "healthy.bin", store.MinChunkSize)
+	uploadAll(t, f, corrupted)
+	uploadAll(t, f, healthy)
+
+	chunkPath := filepath.Join(f.root, "uploads", f.bundle.ID, corrupted.manifest.UploadID, "chunks", "00000000.bin")
+	b, err := os.ReadFile(chunkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b[len(b)/2] ^= 0x80
+	if err := os.WriteFile(chunkPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	key := f.key
+	key.ServerURL = f.server.URL
+	client := collector.New(key)
+	failFastOut := filepath.Join(t.TempDir(), "fail-fast")
+	failFastResults, failFastErr := client.Collect(t.Context(), failFastOut, collector.CollectOptions{Acknowledge: true, FailFast: true})
+	if failFastErr == nil || len(failFastResults) != 0 {
+		t.Fatalf("fail-fast collection = %+v, %v", failFastResults, failFastErr)
+	}
+	if _, err := os.Stat(filepath.Join(failFastOut, "healthy.bin")); !os.IsNotExist(err) {
+		t.Fatalf("fail-fast unexpectedly processed healthy upload: %v", err)
+	}
+
+	out := filepath.Join(t.TempDir(), "received")
+	results, collectErr := client.CollectAll(t.Context(), out, true)
+	if collectErr == nil || !strings.Contains(collectErr.Error(), corrupted.manifest.UploadID) {
+		t.Fatalf("collection error = %v", collectErr)
+	}
+	if len(results) != 1 || results[0].UploadID != healthy.manifest.UploadID {
+		t.Fatalf("healthy submission was blocked by corrupted predecessor: %+v", results)
+	}
+	got, err := os.ReadFile(filepath.Join(out, "healthy.bin"))
+	if err != nil || !bytes.Equal(got, healthyPlain) {
+		t.Fatalf("healthy output mismatch: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "corrupted.bin")); !os.IsNotExist(err) {
+		t.Fatalf("corrupted output exists: %v", err)
+	}
+	receipts, err := client.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 2 || receipts[0].Acknowledged || !receipts[1].Acknowledged {
+		t.Fatalf("unexpected acknowledgement state: %+v", receipts)
+	}
+
+	selectedOut := filepath.Join(t.TempDir(), "selected")
+	selected, selectionErr := client.Collect(t.Context(), selectedOut, collector.CollectOptions{
+		UploadIDs: []string{"CCCCCCCCCCCCCCCCCCCCCC", healthy.manifest.UploadID},
+		FailFast:  false,
+	})
+	if selectionErr == nil || !strings.Contains(selectionErr.Error(), "not a completed submission") {
+		t.Fatalf("selection error = %v", selectionErr)
+	}
+	if len(selected) != 1 || selected[0].UploadID != healthy.manifest.UploadID {
+		t.Fatalf("explicit selection did not re-collect healthy upload: %+v", selected)
+	}
+}
+
+func TestCollectorReportsSavedFileWhenAcknowledgementFails(t *testing.T) {
+	f := newFixture(t, 1, 1<<20)
+	upload := seal(t, f, "DDDDDDDDDDDDDDDDDDDDDD", []byte("saved before acknowledgement"), "saved.txt", store.MinChunkSize)
+	uploadAll(t, f, upload)
+
+	key := f.key
+	key.ServerURL = f.server.URL
+	client := collector.New(key)
+	base := client.HTTP.Transport
+	client.HTTP.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/ack") {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Status:     "500 Internal Server Error",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"TEST_ACK_FAILURE","message":"injected acknowledgement failure"}}`)),
+				Request:    request,
+			}, nil
+		}
+		return base.RoundTrip(request)
+	})
+
+	out := filepath.Join(t.TempDir(), "received")
+	results, collectErr := client.CollectAll(t.Context(), out, true)
+	if collectErr == nil || !strings.Contains(collectErr.Error(), "file saved but acknowledgement failed") {
+		t.Fatalf("acknowledgement error = %v", collectErr)
+	}
+	if len(results) != 1 || results[0].UploadID != upload.manifest.UploadID {
+		t.Fatalf("saved result was lost after acknowledgement failure: %+v", results)
+	}
+	if got, err := os.ReadFile(results[0].Path); err != nil || string(got) != "saved before acknowledgement" {
+		t.Fatalf("saved output = %q, %v", got, err)
+	}
+	receipts, err := client.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 1 || receipts[0].Acknowledged {
+		t.Fatalf("failed acknowledgement changed receipt state: %+v", receipts)
+	}
+}
+
+func TestCollectorStopsBatchOnSharedOutputFailure(t *testing.T) {
+	f := newFixture(t, 2, 1<<20)
+	uploadAll(t, f, seal(t, f, "EEEEEEEEEEEEEEEEEEEEEE", []byte("first"), "first.txt", store.MinChunkSize))
+	uploadAll(t, f, seal(t, f, "FFFFFFFFFFFFFFFFFFFFFF", []byte("second"), "second.txt", store.MinChunkSize))
+
+	key := f.key
+	key.ServerURL = f.server.URL
+	client := collector.New(key)
+	base := client.HTTP.Transport
+	manifestRequests := 0
+	client.HTTP.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(request.URL.Path, "/manifest") {
+			manifestRequests++
+		}
+		return base.RoundTrip(request)
+	})
+	out := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(out, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	results, collectErr := client.CollectAll(t.Context(), out, false)
+	if collectErr == nil || !strings.Contains(collectErr.Error(), "collect upload EEEEEEEEEEEEEEEEEEEEEE") {
+		t.Fatalf("output error = %v", collectErr)
+	}
+	if len(results) != 0 || manifestRequests != 1 {
+		t.Fatalf("shared output failure did not stop batch: results=%+v manifest requests=%d", results, manifestRequests)
+	}
+}
+
+func TestCollectorCancellationBeforeFinalizationLeavesNoFinalFile(t *testing.T) {
+	f := newFixture(t, 2, 1<<20)
+	first := seal(t, f, "GGGGGGGGGGGGGGGGGGGGGG", []byte("first"), "first.txt", store.MinChunkSize)
+	second := seal(t, f, "HHHHHHHHHHHHHHHHHHHHHH", []byte("second"), "second.txt", store.MinChunkSize)
+	uploadAll(t, f, first)
+	uploadAll(t, f, second)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	key := f.key
+	key.ServerURL = f.server.URL
+	client := collector.New(key)
+	base := client.HTTP.Transport
+	manifestRequests := 0
+	client.HTTP.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(request.URL.Path, "/manifest") {
+			manifestRequests++
+		}
+		response, err := base.RoundTrip(request)
+		if err == nil && strings.HasSuffix(request.URL.Path, "/"+first.manifest.UploadID+"/chunks/0") {
+			response.Body = &cancelAtEOFReadCloser{ReadCloser: response.Body, cancel: cancel}
+		}
+		return response, err
+	})
+
+	out := filepath.Join(t.TempDir(), "received")
+	results, collectErr := client.Collect(ctx, out, collector.CollectOptions{})
+	if !errors.Is(collectErr, context.Canceled) {
+		t.Fatalf("cancellation error = %v", collectErr)
+	}
+	if len(results) != 0 || manifestRequests != 1 {
+		t.Fatalf("canceled batch finalized or continued: results=%+v manifest requests=%d", results, manifestRequests)
+	}
+	entries, err := os.ReadDir(out)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("canceled collection exposed output: %v", entries)
+	}
 }
