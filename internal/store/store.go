@@ -185,12 +185,27 @@ func (s *Store) BeginUpload(bundle model.RequestBundle, raw []byte) (model.Manif
 	if !bundle.ExpiresAt.After(s.now()) {
 		return manifest, ErrExpired
 	}
-	uploadDir := filepath.Join(s.uploadsDir(), filepath.Base(bundle.ID), filepath.Base(manifest.UploadID))
-	if info, err := os.Lstat(uploadDir); err == nil {
+	// Keep both identifiers as single path components at the filesystem boundary.
+	// validateBundle and validateManifest already enforce a stricter allow list; the
+	// explicit separator checks make that invariant local to the path operation.
+	if strings.Contains(bundle.ID, "/") || strings.Contains(bundle.ID, "\\") || strings.Contains(bundle.ID, "..") ||
+		strings.Contains(manifest.UploadID, "/") || strings.Contains(manifest.UploadID, "\\") || strings.Contains(manifest.UploadID, "..") {
+		return manifest, fmt.Errorf("%w: upload path components", ErrInvalid)
+	}
+	uploadRelative := filepath.Join(bundle.ID, manifest.UploadID)
+	uploadDir := filepath.Join(s.uploadsDir(), bundle.ID, manifest.UploadID)
+	uploadsRoot, err := os.OpenRoot(s.uploadsDir())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return manifest, err
+	}
+	if uploadsRoot != nil {
+		defer uploadsRoot.Close()
+	}
+	if info, err := uploadsRootLstat(uploadsRoot, uploadRelative); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return manifest, ErrConflict
 		}
-		existing, err := os.ReadFile(filepath.Join(uploadDir, "manifest.json"))
+		existing, err := uploadsRoot.ReadFile(filepath.Join(uploadRelative, "manifest.json"))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return manifest, ErrConflict
@@ -200,14 +215,18 @@ func (s *Store) BeginUpload(bundle model.RequestBundle, raw []byte) (model.Manif
 		if subtle.ConstantTimeCompare(existing, raw) != 1 {
 			return manifest, ErrConflict
 		}
-		state, err := s.readServerState(bundle.ID, manifest.UploadID)
+		stateBytes, err := uploadsRoot.ReadFile(filepath.Join(uploadRelative, "server.json"))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return manifest, ErrConflict
 			}
 			return manifest, err
 		}
-		chunks, err := os.Lstat(filepath.Join(uploadDir, "chunks"))
+		var state model.UploadServerState
+		if err := json.Unmarshal(stateBytes, &state); err != nil {
+			return manifest, err
+		}
+		chunks, err := uploadsRoot.Lstat(filepath.Join(uploadRelative, "chunks"))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return manifest, ErrConflict
@@ -261,6 +280,13 @@ func (s *Store) BeginUpload(bundle model.RequestBundle, raw []byte) (model.Manif
 	}
 	cleanup = false
 	return manifest, nil
+}
+
+func uploadsRootLstat(root *os.Root, name string) (os.FileInfo, error) {
+	if root == nil {
+		return nil, os.ErrNotExist
+	}
+	return root.Lstat(name)
 }
 
 func (s *Store) PutChunk(requestID, uploadID string, index int, r io.Reader, contentLength int64) error {
