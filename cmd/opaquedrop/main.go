@@ -8,11 +8,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -222,6 +224,8 @@ func collectCommand(args []string) error {
 	out := flags.String("out", "received", "output directory")
 	noAck := flags.Bool("no-ack", false, "do not acknowledge successful collection")
 	failFast := flags.Bool("fail-fast", false, "stop after the first failed submission")
+	listOnly := flags.Bool("list", false, "list completed submissions without downloading file content")
+	includeAcknowledged := flags.Bool("all", false, "with --list, include acknowledged submissions")
 	readRetries := flags.Int("read-retries", collector.DefaultReadRetries, "retries after a temporary list, manifest, or chunk read failure (0-10)")
 	var uploadIDs repeatedStringFlag
 	flags.Var(&uploadIDs, "upload", "collect only this completed upload ID (repeatable; acknowledged uploads may be re-collected)")
@@ -230,6 +234,9 @@ func collectCommand(args []string) error {
 	}
 	if *readRetries < 0 || *readRetries > collector.MaxReadRetries {
 		return fmt.Errorf("--read-retries must be between 0 and %d", collector.MaxReadRetries)
+	}
+	if *includeAcknowledged && !*listOnly {
+		return errors.New("--all requires --list")
 	}
 	for _, uploadID := range uploadIDs {
 		if !core.ValidID(uploadID) {
@@ -248,6 +255,23 @@ func collectCommand(args []string) error {
 	client.RetryLog = os.Stderr
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	if *listOnly {
+		inspections, inspectErr := client.Inspect(ctx, collector.InspectOptions{
+			UploadIDs: uploadIDs, IncludeAcknowledged: *includeAcknowledged, FailFast: *failFast,
+		})
+		var outputErr error
+		if len(inspections) == 0 && inspectErr == nil {
+			if *includeAcknowledged {
+				_, outputErr = fmt.Fprintln(os.Stdout, "No completed submissions.")
+			} else {
+				_, outputErr = fmt.Fprintln(os.Stdout, "No unacknowledged submissions.")
+			}
+		}
+		if outputErr == nil {
+			outputErr = writeInspections(os.Stdout, inspections)
+		}
+		return errors.Join(inspectErr, outputErr)
+	}
 	results, collectErr := client.Collect(ctx, *out, collector.CollectOptions{
 		Acknowledge: !*noAck,
 		UploadIDs:   uploadIDs,
@@ -260,6 +284,24 @@ func collectCommand(args []string) error {
 		fmt.Printf("Collected %s\n  path: %s\n  bytes: %d\n  plaintext sha256: %s\n  receipt sha256:   %s\n", result.UploadID, result.Path, result.PlainBytes, result.PlainSHA256, result.ReceiptSHA256)
 	}
 	return collectErr
+}
+
+func writeInspections(writer io.Writer, inspections []collector.Inspection) error {
+	for _, inspection := range inspections {
+		state := "pending"
+		if inspection.Acknowledged {
+			state = "acknowledged"
+		}
+		name := inspection.Name
+		if inspection.MetadataVerified {
+			name = strconv.Quote(name)
+		}
+		if _, err := fmt.Fprintf(writer, "Upload %s\n  state: %s\n  completed: %s\n  bytes: %d\n  name: %s\n",
+			inspection.UploadID, state, inspection.CompletedAt.UTC().Format(time.RFC3339), inspection.PlainBytes, name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func doctorCommand(args []string) error {
@@ -391,6 +433,7 @@ Usage:
   opaquedrop request create --data DIR --base-url URL --label TEXT [options]
   opaquedrop serve --data DIR [--listen 127.0.0.1:8080] [--trusted-proxy IP_OR_CIDR]
   opaquedrop collect --key FILE --out DIR [--upload ID] [--fail-fast] [--read-retries N]
+  opaquedrop collect --key FILE --list [--all] [--upload ID] [--fail-fast] [--read-retries N]
   opaquedrop doctor --data DIR
   opaquedrop purge --data DIR [--apply]
   opaquedrop version

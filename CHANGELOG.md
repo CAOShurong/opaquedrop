@@ -4,6 +4,19 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-11
+
+### Added
+
+- `collect --list` to inspect unacknowledged completed submissions before downloading, with authenticated local metadata decryption for sanitized filenames, sizes, completion times, states, and upload IDs.
+- `collect --list --all` to include acknowledged submissions, plus repeatable `--upload ID` filtering for a named inspection subset.
+
+### Changed
+
+- Inspection fetches only the bounded receipt list and selected manifests; it creates no output directory, downloads no ciphertext chunks, and sends no acknowledgement.
+- An unreadable manifest or encrypted filename is reported by upload ID as `<unreadable>` without blocking later healthy inspection results; any such partial failure still exits nonzero.
+- Sender-provided names are displayed through the same cross-platform filename sanitizer used for collection and are quoted before terminal output.
+
 ## [0.5.0] - 2026-08-11
 
 ### Added
@@ -76,7 +89,8 @@ All notable changes are documented here.
 - Deterministic browser WebCrypto ↔ Go test vector and adversarial corruption/reordering tests.
 - Embedded responsive upload UI and dependency-free release binaries.
 
-[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/CAOShurong/opaquedrop/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/CAOShurong/opaquedrop/compare/v0.2.0...v0.3.0

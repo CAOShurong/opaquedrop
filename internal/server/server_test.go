@@ -531,6 +531,158 @@ func TestCollectorContinuesAfterCorruptedSubmission(t *testing.T) {
 	}
 }
 
+func TestCollectorInspectsSubmissionsWithoutDownloadingChunks(t *testing.T) {
+	f := newFixture(t, 2, 1<<20)
+	pending := seal(t, f, "MMMMMMMMMMMMMMMMMMMMMM", []byte("pending"), "line\nbreak\x1b.txt", store.MinChunkSize)
+	acknowledged := seal(t, f, "NNNNNNNNNNNNNNNNNNNNNN", []byte("acknowledged"), "ready.txt", store.MinChunkSize)
+	uploadAll(t, f, pending)
+	uploadAll(t, f, acknowledged)
+
+	key := f.key
+	key.ServerURL = f.server.URL
+	client := collector.New(key)
+	if results, err := client.Collect(t.Context(), filepath.Join(t.TempDir(), "received"), collector.CollectOptions{
+		Acknowledge: true,
+		UploadIDs:   []string{acknowledged.manifest.UploadID},
+	}); err != nil || len(results) != 1 {
+		t.Fatalf("acknowledge fixture = %+v, %v", results, err)
+	}
+
+	client = collector.New(key)
+	base := client.HTTP.Transport
+	listRequests := 0
+	manifestRequests := 0
+	chunkRequests := 0
+	ackRequests := 0
+	client.HTTP.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/uploads"):
+			listRequests++
+		case strings.HasSuffix(request.URL.Path, "/manifest"):
+			manifestRequests++
+		case strings.Contains(request.URL.Path, "/chunks/"):
+			chunkRequests++
+		case strings.HasSuffix(request.URL.Path, "/ack"):
+			ackRequests++
+		}
+		return base.RoundTrip(request)
+	})
+
+	inspections, err := client.Inspect(t.Context(), collector.InspectOptions{IncludeAcknowledged: true})
+	if err != nil || len(inspections) != 2 {
+		t.Fatalf("Inspect() = %+v, %v", inspections, err)
+	}
+	byID := make(map[string]collector.Inspection, len(inspections))
+	for _, inspection := range inspections {
+		byID[inspection.UploadID] = inspection
+	}
+	if got := byID[pending.manifest.UploadID]; !got.MetadataVerified || got.Name != core.SafeFilename("line\nbreak\x1b.txt") || got.Acknowledged || got.PlainBytes != int64(len("pending")) {
+		t.Fatalf("pending inspection = %+v", got)
+	}
+	if got := byID[acknowledged.manifest.UploadID]; !got.MetadataVerified || got.Name != "ready.txt" || !got.Acknowledged || got.PlainBytes != int64(len("acknowledged")) {
+		t.Fatalf("acknowledged inspection = %+v", got)
+	}
+	if listRequests != 1 || manifestRequests != 2 || chunkRequests != 0 || ackRequests != 0 {
+		t.Fatalf("inspection requests list=%d manifest=%d chunk=%d ack=%d", listRequests, manifestRequests, chunkRequests, ackRequests)
+	}
+}
+
+func TestCollectorInspectionContinuesAfterUnreadableMetadata(t *testing.T) {
+	f := newFixture(t, 2, 1<<20)
+	unreadable := seal(t, f, "OOOOOOOOOOOOOOOOOOOOOO", []byte("unreadable"), "unreadable.txt", store.MinChunkSize)
+	healthy := seal(t, f, "PPPPPPPPPPPPPPPPPPPPPP", []byte("healthy"), "healthy.txt", store.MinChunkSize)
+	uploadAll(t, f, unreadable)
+	uploadAll(t, f, healthy)
+
+	manifestPath := filepath.Join(f.root, "uploads", f.bundle.ID, unreadable.manifest.UploadID, "manifest.json")
+	manifestRaw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest model.Manifest
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := base64.RawURLEncoding.DecodeString(manifest.EncryptedMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata[len(metadata)/2] ^= 0x80
+	manifest.EncryptedMetadata = base64.RawURLEncoding.EncodeToString(metadata)
+	manifestRaw, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, manifestRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	key := f.key
+	key.ServerURL = f.server.URL
+	client := collector.New(key)
+	base := client.HTTP.Transport
+	chunkRequests := 0
+	client.HTTP.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.Contains(request.URL.Path, "/chunks/") {
+			chunkRequests++
+		}
+		return base.RoundTrip(request)
+	})
+	inspections, inspectErr := client.Inspect(t.Context(), collector.InspectOptions{})
+	if inspectErr == nil || !strings.Contains(inspectErr.Error(), unreadable.manifest.UploadID) {
+		t.Fatalf("Inspect() error = %v", inspectErr)
+	}
+	if len(inspections) != 2 || chunkRequests != 0 {
+		t.Fatalf("Inspect() = %+v, chunk requests=%d", inspections, chunkRequests)
+	}
+	byID := make(map[string]collector.Inspection, len(inspections))
+	for _, inspection := range inspections {
+		byID[inspection.UploadID] = inspection
+	}
+	if got := byID[unreadable.manifest.UploadID]; got.MetadataVerified || got.Name != "<unreadable>" {
+		t.Fatalf("unreadable inspection = %+v", got)
+	}
+	if got := byID[healthy.manifest.UploadID]; !got.MetadataVerified || got.Name != "healthy.txt" {
+		t.Fatalf("healthy inspection = %+v", got)
+	}
+}
+
+func TestCollectorInspectionCancellationDoesNotInventUnreadableResult(t *testing.T) {
+	f := newFixture(t, 1, 1<<20)
+	upload := seal(t, f, "TTTTTTTTTTTTTTTTTTTTTT", []byte("cancel"), "cancel.txt", store.MinChunkSize)
+	uploadAll(t, f, upload)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	key := f.key
+	key.ServerURL = f.server.URL
+	client := collector.New(key)
+	base := client.HTTP.Transport
+	manifestRequests := 0
+	chunkRequests := 0
+	ackRequests := 0
+	client.HTTP.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/manifest"):
+			manifestRequests++
+			cancel()
+			return nil, context.Canceled
+		case strings.Contains(request.URL.Path, "/chunks/"):
+			chunkRequests++
+		case strings.HasSuffix(request.URL.Path, "/ack"):
+			ackRequests++
+		}
+		return base.RoundTrip(request)
+	})
+	inspections, err := client.Inspect(ctx, collector.InspectOptions{})
+	if !errors.Is(err, context.Canceled) || len(inspections) != 0 {
+		t.Fatalf("canceled inspection = %+v, %v", inspections, err)
+	}
+	if manifestRequests != 1 || chunkRequests != 0 || ackRequests != 0 {
+		t.Fatalf("canceled inspection requests manifest=%d chunk=%d ack=%d", manifestRequests, chunkRequests, ackRequests)
+	}
+}
+
 func TestCollectorReportsSavedFileWhenAcknowledgementFails(t *testing.T) {
 	f := newFixture(t, 1, 1<<20)
 	upload := seal(t, f, "DDDDDDDDDDDDDDDDDDDDDD", []byte("saved before acknowledgement"), "saved.txt", store.MinChunkSize)

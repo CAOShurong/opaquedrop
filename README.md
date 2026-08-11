@@ -72,10 +72,11 @@ opaquedrop serve \
 Share the printed upload link. After files arrive, collect and authenticate them:
 
 ```console
+opaquedrop collect --key ./family-photos.key.json --list
 opaquedrop collect --key ./family-photos.key.json --out ./received
 ```
 
-The upload page retries a temporarily interrupted setup, chunk, or completion request three times while that page remains open. The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically publishes it without replacing an existing name, and only then acknowledges collection. A damaged or malicious submission is reported by upload ID but does not block later healthy submissions; any failure still makes the command exit nonzero. Temporary list, manifest, and chunk GET failures retry three times by default, so one interrupted chunk does not restart the current file. Use repeatable `--upload ID` for an explicit subset, `--fail-fast` for first-error automation, or `--read-retries 0` to disable read retries.
+`--list` fetches no file chunks. It authenticates and decrypts each pending filename locally, then shows the upload ID, sanitized name, declared size, completion time, and acknowledgement state so the recipient can choose an item with `--upload ID`. Add `--all` to include acknowledged submissions. The upload page retries a temporarily interrupted setup, chunk, or completion request three times while that page remains open. The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically publishes it without replacing an existing name, and only then acknowledges collection. A damaged or malicious submission is reported by upload ID but does not block later healthy submissions; any failure still makes the command exit nonzero. Temporary list, manifest, and chunk GET failures retry three times by default, so one interrupted chunk does not restart the current file. Use repeatable `--upload ID` for an explicit subset, `--fail-fast` for first-error automation, or `--read-retries 0` to disable read retries.
 
 ## Keep the recipient key off the server
 
@@ -104,6 +105,7 @@ The public bundle contains a P-256 public key and SHA-256 hashes of two independ
 - Corrupted, reordered, and missing chunks fail without a completed output file.
 - A corrupted completed submission remains unacknowledged and produces no final file, while later healthy submissions are still verified, saved, reported, and acknowledged; partial collection exits nonzero.
 - Truncated and temporary-error GET attempts are discarded before decryption or writing; only a complete bounded response can contribute one chunk to the output, and acknowledgement POST is never automatically replayed.
+- Recipient inspection authenticates encrypted manifest metadata locally but never fetches chunks, creates an output directory, or acknowledges a submission; unreadable metadata is isolated by upload ID and makes the command exit nonzero.
 - Browser upload retries reuse the exact same manifest, ciphertext, and completion identity. An already-stored chunk advances only after its SHA-256 digest matches; a different manifest under the same upload ID remains a conflict.
 - Manifest bodies are limited to 64 KiB; ciphertext chunks are limited to 8 MiB; the shipped browser uses 1 MiB chunks.
 - Request file and byte quotas count incomplete reservations, closing the obvious concurrent-overcommit path.
@@ -138,6 +140,8 @@ opaquedrop version    Print the build version
 `purge` is a dry run unless `--apply` is supplied. A request can opt into deleting server ciphertext immediately after a verified collector acknowledgement with `--delete-after-collect`; the default keeps it until expiry cleanup so a recipient can recover from a local mistake.
 
 `collect` processes unacknowledged submissions in completion order. It keeps going after a per-submission authentication or protocol failure, but stops immediately for cancellation, `--fail-fast`, or an output-filesystem error. An explicitly selected acknowledged upload may be collected again when retained ciphertext is still available.
+
+`collect --list` inspects unacknowledged completed submissions without downloading file content. `--all` includes acknowledged items, and repeatable `--upload ID` limits inspection to exact IDs. The displayed filename is authenticated encrypted metadata and is sanitized to the name OpaqueDrop would use on disk; it is not proof that the file content is safe or intact. Listing reveals filenames to the recipient's terminal and any terminal log, so use the command only where that local disclosure is acceptable. A bad manifest or filename is shown as `<unreadable>`, later items still appear, and the command exits nonzero.
 
 Read retries are process-local, bounded, and limited to safe GET requests. They recover an interrupted list, manifest, or individual chunk while the command remains running; they are not persistent resume after a process exit. Retry waits honor Ctrl+C. A `Retry-After` longer than 30 seconds is reported instead of being retried early or making the CLI wait without a clear bound. The acknowledgement POST is sent once and does not follow redirects.
 

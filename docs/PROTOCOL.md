@@ -111,6 +111,12 @@ receipt_sha256 = SHA256(
 
 The browser independently computes and compares this value. The collector recomputes it after downloading ciphertext and compares it with the completion receipt before finalizing output.
 
+## Recipient inspection
+
+Inspection adds no endpoint or wire-format field. The collector first requests the existing authenticated receipt list, then fetches only the manifest for each selected completed upload. It requires the receipt request ID and upload ID to match the key file, requires manifest request ID, upload ID, plaintext size, and chunk count to match the receipt, and authenticates `encrypted_metadata` with the recipient private key.
+
+This proves that the displayed sanitized filename came from metadata authenticated to that manifest. It does not authenticate file chunks or the final ciphertext receipt, which still requires full collection. Inspection never requests chunk endpoints and never sends the acknowledgement POST.
+
 ## Same-tab transfer replay
 
 Transfer recovery does not change the cryptographic format. A repeated manifest setup must contain the exact same request body and upload ID; the server accepts it only when the existing manifest, server state, and chunks directory match that upload. Different bytes under the same upload ID are a conflict.
