@@ -109,6 +109,14 @@ The collector publishes a fully verified temporary file with a same-directory ha
 
 OpaqueDrop does not automatically delete or acknowledge a failed submission. Retaining it preserves evidence and avoids turning a decryption error into destructive server action. Operators can let request expiry remove it or investigate the upload ID before cleanup.
 
+### Transient read failures
+
+The collector makes one initial attempt plus three read retries by default for list, manifest, and chunk GET requests. It retries transport/body-read failures and temporary 408, 425, 429, 500, 502, 503, and 504 responses with context-aware exponential backoff. Use `--read-retries 0` to disable or a value through 10 for an unusually unreliable path. Each failed chunk attempt is discarded before decryption or output writing; a later successful attempt contributes the chunk exactly once and does not re-fetch earlier chunks.
+
+`Retry-After` seconds and HTTP dates are honored when the requested wait is at most 30 seconds. A longer value ends that item with a clear error rather than retrying too early. Ctrl+C interrupts requests and backoff waits and prevents final publication when cancellation wins before the atomic publish point.
+
+This is in-process request recovery, not restart-safe resume: terminating the collector removes its random `.part` file, and a later command starts that file again. OpaqueDrop sends acknowledgement POST once and refuses redirects rather than replaying it at a new location. With `--delete-after-collect`, a successful acknowledgement deletes the upload, so a lost response followed by a retry would be indistinguishable from an upload that never existed; the collector instead preserves the saved-file result and reports the acknowledgement failure.
+
 ## Cleanup
 
 Preview expired requests and incomplete uploads older than 24 hours:

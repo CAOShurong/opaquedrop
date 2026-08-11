@@ -75,6 +75,7 @@ The 64-bit nonce prefix does not need to be globally collision-free because ever
 - Chunk uploads go to a private temporary file and rename into place only after the exact declared length is received.
 - Completion validates every expected chunk and length, computes the receipt, writes a temporary marker, syncs it, and atomically renames it to `complete.json`.
 - Collection decrypts one bounded chunk at a time into a private temporary output file, verifies the receipt and total length, checks cancellation, syncs the file, and atomically publishes a no-replace hard link under a sanitized, component-bounded basename.
+- Automatic retries apply only to read-only GET operations. An incomplete or temporary-error attempt is fully discarded before decryption or writing, so a successful retry cannot duplicate plaintext; acknowledgement POST is sent once and redirects are not followed.
 - A missing, corrupted, reordered, or header-mismatched upload leaves no completed recipient file.
 - A failed completed upload cannot prevent later healthy submissions in the same request from being collected. Partial success still returns a nonzero CLI exit so automation cannot mistake the batch for wholly successful.
 

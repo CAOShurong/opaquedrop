@@ -1,7 +1,10 @@
 package collector
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -63,6 +66,203 @@ func TestPublishOutputNeverReplacesACollision(t *testing.T) {
 	}
 	if len(seen) != count {
 		t.Fatalf("published %d files, want %d", len(seen), count)
+	}
+}
+
+func TestReadRetriesTruncatedBodyAndTransientStatus(t *testing.T) {
+	t.Run("truncated body", func(t *testing.T) {
+		attempts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			attempts++
+			if attempts == 1 {
+				response.Header().Set("Content-Length", "12")
+				_, _ = response.Write([]byte("short"))
+				return
+			}
+			_, _ = response.Write([]byte("complete"))
+		}))
+		defer server.Close()
+		const capability = "CAPABILITY-DO-NOT-LOG"
+		client := New(model.KeyFile{ServerURL: server.URL, CollectToken: capability})
+		client.HTTP = server.Client()
+		client.ReadRetries = 1
+		client.retryBaseDelay = 0
+		var retryLog bytes.Buffer
+		client.RetryLog = &retryLog
+		got, err := client.bytesRequest(t.Context(), server.URL, 64)
+		if err != nil || string(got) != "complete" || attempts != 2 {
+			t.Fatalf("bytesRequest() = %q, %v after %d attempts", got, err, attempts)
+		}
+		if !strings.Contains(retryLog.String(), "read attempt 1/2 failed") {
+			t.Fatalf("retry was not reported: %q", retryLog.String())
+		}
+		if strings.Contains(retryLog.String(), capability) {
+			t.Fatalf("retry log contained collect capability: %q", retryLog.String())
+		}
+	})
+
+	t.Run("temporary status and Retry-After", func(t *testing.T) {
+		attempts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			attempts++
+			response.Header().Set("Retry-After", "7")
+			http.Error(response, "temporarily unavailable", http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+		client := New(model.KeyFile{ServerURL: server.URL, CollectToken: "test"})
+		client.HTTP = server.Client()
+		client.ReadRetries = 1
+		client.retryMaxDelay = 10 * time.Second
+		var delays []time.Duration
+		client.sleep = func(ctx context.Context, delay time.Duration) error {
+			delays = append(delays, delay)
+			return nil
+		}
+		_, err := client.bytesRequest(t.Context(), server.URL, 64)
+		if err == nil || attempts != 2 || len(delays) != 1 || delays[0] != 7*time.Second {
+			t.Fatalf("temporary response attempts=%d delays=%v error=%v", attempts, delays, err)
+		}
+	})
+}
+
+func TestReadRetryBoundaries(t *testing.T) {
+	t.Run("disabled retry makes one attempt", func(t *testing.T) {
+		attempts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			attempts++
+			http.Error(response, "temporary", http.StatusBadGateway)
+		}))
+		defer server.Close()
+		client := New(model.KeyFile{ServerURL: server.URL, CollectToken: "test"})
+		client.HTTP = server.Client()
+		client.ReadRetries = 0
+		_, err := client.bytesRequest(t.Context(), server.URL, 64)
+		if err == nil || attempts != 1 {
+			t.Fatalf("disabled retry attempts=%d error=%v", attempts, err)
+		}
+	})
+
+	t.Run("permanent status is not retried", func(t *testing.T) {
+		attempts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			attempts++
+			http.Error(response, "not found", http.StatusNotFound)
+		}))
+		defer server.Close()
+		client := New(model.KeyFile{ServerURL: server.URL, CollectToken: "test"})
+		client.HTTP = server.Client()
+		client.ReadRetries = 3
+		_, err := client.bytesRequest(t.Context(), server.URL, 64)
+		if err == nil || attempts != 1 {
+			t.Fatalf("permanent response attempts=%d error=%v", attempts, err)
+		}
+	})
+
+	t.Run("excessive Retry-After is not retried early", func(t *testing.T) {
+		attempts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			attempts++
+			response.Header().Set("Retry-After", "31")
+			http.Error(response, "slow down", http.StatusTooManyRequests)
+		}))
+		defer server.Close()
+		client := New(model.KeyFile{ServerURL: server.URL, CollectToken: "test"})
+		client.HTTP = server.Client()
+		client.ReadRetries = 3
+		client.retryMaxDelay = 30 * time.Second
+		_, err := client.bytesRequest(t.Context(), server.URL, 64)
+		if err == nil || attempts != 1 || !strings.Contains(err.Error(), "Retry-After") {
+			t.Fatalf("long Retry-After attempts=%d error=%v", attempts, err)
+		}
+	})
+
+	t.Run("maximum Retry-After is accepted", func(t *testing.T) {
+		attempts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			attempts++
+			response.Header().Set("Retry-After", "30")
+			http.Error(response, "temporary", http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+		client := New(model.KeyFile{ServerURL: server.URL, CollectToken: "test"})
+		client.HTTP = server.Client()
+		client.ReadRetries = 1
+		client.retryMaxDelay = 30 * time.Second
+		var delays []time.Duration
+		client.sleep = func(ctx context.Context, delay time.Duration) error {
+			delays = append(delays, delay)
+			return nil
+		}
+		_, err := client.bytesRequest(t.Context(), server.URL, 64)
+		if err == nil || attempts != 2 || len(delays) != 1 || delays[0] != 30*time.Second {
+			t.Fatalf("maximum Retry-After attempts=%d delays=%v error=%v", attempts, delays, err)
+		}
+	})
+
+	t.Run("cancellation interrupts backoff", func(t *testing.T) {
+		attempts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			attempts++
+			http.Error(response, "temporary", http.StatusBadGateway)
+		}))
+		defer server.Close()
+		client := New(model.KeyFile{ServerURL: server.URL, CollectToken: "test"})
+		client.HTTP = server.Client()
+		client.ReadRetries = 3
+		enteredSleep := make(chan struct{})
+		client.sleep = func(ctx context.Context, delay time.Duration) error {
+			close(enteredSleep)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() {
+			_, err := client.bytesRequest(ctx, server.URL, 64)
+			done <- err
+		}()
+		<-enteredSleep
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) || attempts != 1 {
+			t.Fatalf("canceled retry attempts=%d error=%v", attempts, err)
+		}
+	})
+}
+
+func TestInvalidListJSONIsNotRetried(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		attempts++
+		_, _ = response.Write([]byte(`{"uploads":`))
+	}))
+	defer server.Close()
+	client := New(model.KeyFile{RequestID: "RRRRRRRRRRRRRRRRRRRRRR", ServerURL: server.URL, CollectToken: "test"})
+	client.HTTP = server.Client()
+	client.ReadRetries = 3
+	if _, err := client.List(t.Context()); err == nil || attempts != 1 {
+		t.Fatalf("invalid JSON attempts=%d error=%v", attempts, err)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, time.August, 11, 8, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		value string
+		want  time.Duration
+		ok    bool
+	}{
+		{value: "7", want: 7 * time.Second, ok: true},
+		{value: now.Add(9 * time.Second).Format(http.TimeFormat), want: 9 * time.Second, ok: true},
+		{value: now.Add(-time.Minute).Format(http.TimeFormat), want: 0, ok: true},
+		{value: "18446744074", want: time.Duration(1<<63 - 1), ok: true},
+		{value: "9223372036854775807", want: time.Duration(1<<63 - 1), ok: true},
+		{value: "999999999999999999999999999999", want: time.Duration(1<<63 - 1), ok: true},
+		{value: "invalid", want: 0, ok: false},
+	} {
+		got, ok := parseRetryAfter(test.value, now)
+		if got != test.want || ok != test.ok {
+			t.Errorf("parseRetryAfter(%q) = %s, %t; want %s, %t", test.value, got, ok, test.want, test.ok)
+		}
 	}
 }
 

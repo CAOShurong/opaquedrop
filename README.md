@@ -75,7 +75,7 @@ Share the printed upload link. After files arrive, collect and authenticate them
 opaquedrop collect --key ./family-photos.key.json --out ./received
 ```
 
-The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically publishes it without replacing an existing name, and only then acknowledges collection. A damaged or malicious submission is reported by upload ID but does not block later healthy submissions; any failure still makes the command exit nonzero. Use repeatable `--upload ID` for an explicit subset or `--fail-fast` when automation should stop on the first per-submission error.
+The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically publishes it without replacing an existing name, and only then acknowledges collection. A damaged or malicious submission is reported by upload ID but does not block later healthy submissions; any failure still makes the command exit nonzero. Temporary list, manifest, and chunk GET failures retry three times by default, so one interrupted chunk does not restart the current file. Use repeatable `--upload ID` for an explicit subset, `--fail-fast` for first-error automation, or `--read-retries 0` to disable read retries.
 
 ## Keep the recipient key off the server
 
@@ -103,6 +103,7 @@ The public bundle contains a P-256 public key and SHA-256 hashes of two independ
 - A SHA-256 header binding is authenticated as AES-GCM associated data for metadata and every chunk.
 - Corrupted, reordered, and missing chunks fail without a completed output file.
 - A corrupted completed submission remains unacknowledged and produces no final file, while later healthy submissions are still verified, saved, reported, and acknowledged; partial collection exits nonzero.
+- Truncated and temporary-error GET attempts are discarded before decryption or writing; only a complete bounded response can contribute one chunk to the output, and acknowledgement POST is never automatically replayed.
 - Manifest bodies are limited to 64 KiB; ciphertext chunks are limited to 8 MiB; the shipped browser uses 1 MiB chunks.
 - Request file and byte quotas count incomplete reservations, closing the obvious concurrent-overcommit path.
 - Capability tokens arrive only in an `Authorization` header, are stored only as hashes, and are not logged.
@@ -136,6 +137,8 @@ opaquedrop version    Print the build version
 `purge` is a dry run unless `--apply` is supplied. A request can opt into deleting server ciphertext immediately after a verified collector acknowledgement with `--delete-after-collect`; the default keeps it until expiry cleanup so a recipient can recover from a local mistake.
 
 `collect` processes unacknowledged submissions in completion order. It keeps going after a per-submission authentication or protocol failure, but stops immediately for cancellation, `--fail-fast`, or an output-filesystem error. An explicitly selected acknowledged upload may be collected again when retained ciphertext is still available.
+
+Read retries are process-local, bounded, and limited to safe GET requests. They recover an interrupted list, manifest, or individual chunk while the command remains running; they are not persistent resume after a process exit. Retry waits honor Ctrl+C. A `Retry-After` longer than 30 seconds is reported instead of being retried early or making the CLI wait without a clear bound. The acknowledgement POST is sent once and does not follow redirects.
 
 ## Deployment
 

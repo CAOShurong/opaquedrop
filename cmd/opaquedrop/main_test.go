@@ -18,3 +18,10 @@ func TestCollectRejectsInvalidUploadIDBeforeReadingKey(t *testing.T) {
 		t.Fatalf("collect error = %v", err)
 	}
 }
+
+func TestCollectRejectsInvalidReadRetriesBeforeReadingKey(t *testing.T) {
+	err := run([]string{"collect", "--key", "missing.json", "--read-retries", "-1"})
+	if err == nil || !strings.Contains(err.Error(), "--read-retries") {
+		t.Fatalf("collect error = %v", err)
+	}
+}
