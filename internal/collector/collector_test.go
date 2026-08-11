@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -40,7 +41,7 @@ func TestPublishOutputNeverReplacesACollision(t *testing.T) {
 				errs <- err
 				return
 			}
-			destination, err := publishOutput(temp.Name(), dir, "same.txt")
+			destination, err := publishOutput(temp.Name(), dir, "same.txt", os.Link)
 			if err != nil {
 				errs <- err
 				return
@@ -301,8 +302,105 @@ func TestPublishOutputReturnsComponentErrors(t *testing.T) {
 	if err := temp.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := publishOutput(temp.Name(), dir, strings.Repeat("x", 300)); err == nil {
+	if _, err := publishOutput(temp.Name(), dir, strings.Repeat("x", 300), os.Link); err == nil {
 		t.Fatal("overlong component did not return an error")
+	}
+}
+
+func TestOutputPublicationPreflightCleansProbeFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "received")
+	if err := prepareOutputDir(dir, os.Link); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("preflight left files: %v", entries)
+	}
+}
+
+func TestOutputPublicationPreflightRejectsCopyMasqueradingAsLink(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "received")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := preflightOutputPublication(dir, func(oldname, newname string) error {
+		contents, err := os.ReadFile(oldname)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(newname, contents, 0o600)
+	})
+	if err == nil || !strings.Contains(err.Error(), "did not preserve hard-link identity") {
+		t.Fatalf("preflight error = %v", err)
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("identity failure left probe files: %v", entries)
+	}
+}
+
+func TestOutputPublicationPreflightStopsBeforeChunkDownload(t *testing.T) {
+	vectorBytes, err := os.ReadFile(filepath.Join("..", "..", "testdata", "protocol-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vector struct {
+		RecipientPrivateKey string `json:"recipient_private_key"`
+		RecipientPublicKey  string `json:"recipient_public_key"`
+		ManifestJSON        string `json:"manifest_json"`
+		ReceiptSHA256       string `json:"receipt_sha256"`
+	}
+	if err := json.Unmarshal(vectorBytes, &vector); err != nil {
+		t.Fatal(err)
+	}
+	const requestID = "AQEBAQEBAQEBAQEBAQEBAQ"
+	const uploadID = "AgICAgICAgICAgICAgICAg"
+	chunkRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/api/v1/collect/"+requestID+"/uploads":
+			_ = json.NewEncoder(response).Encode(map[string]any{"uploads": []model.Receipt{{
+				Version: 1, RequestID: requestID, UploadID: uploadID, CompletedAt: time.Now().UTC(),
+				PlainSize: 56, CipherBytes: 88, ChunkCount: 2, ReceiptSHA256: vector.ReceiptSHA256,
+			}}})
+		case strings.HasSuffix(request.URL.Path, "/manifest"):
+			_, _ = response.Write([]byte(vector.ManifestJSON))
+		case strings.Contains(request.URL.Path, "/chunks/"):
+			chunkRequests++
+			http.Error(response, "chunk must not be requested", http.StatusInternalServerError)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	client := New(model.KeyFile{
+		SchemaVersion: model.SchemaVersion, RequestID: requestID, ServerURL: server.URL,
+		CollectToken: "collect-token", PrivateKey: vector.RecipientPrivateKey, PublicKey: vector.RecipientPublicKey,
+	})
+	client.HTTP = server.Client()
+	client.ReadRetries = 0
+	client.link = func(string, string) error { return errors.New("operation not supported") }
+	outDir := filepath.Join(t.TempDir(), "received")
+	_, err = client.Collect(t.Context(), outDir, CollectOptions{})
+	if err == nil || !strings.Contains(err.Error(), "atomic no-replace hard-link publish") {
+		t.Fatalf("Collect error = %v", err)
+	}
+	if chunkRequests != 0 {
+		t.Fatalf("collector fetched %d chunks before detecting unsupported output", chunkRequests)
+	}
+	entries, readErr := os.ReadDir(outDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed preflight left output files: %v", entries)
 	}
 }
 

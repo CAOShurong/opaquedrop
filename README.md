@@ -154,6 +154,8 @@ opaquedrop version    Print the build version
 
 `collect --list` inspects unacknowledged completed submissions without downloading file content. `--all` includes acknowledged items, and repeatable `--upload ID` limits inspection to exact IDs. The displayed filename is authenticated encrypted metadata and is sanitized to the name OpaqueDrop would use on disk; it is not proof that the file content is safe or intact. Listing reveals filenames to the recipient's terminal and any terminal log, so use the command only where that local disclosure is acceptable. A bad manifest or filename is shown as `<unreadable>`, later items still appear, and the command exits nonzero.
 
+Before downloading a selected file's ciphertext chunks, the collector now exercises its exact atomic no-replace publication primitive with a small same-directory probe. A local filesystem that supports it proceeds normally; an SMB, cloud, removable, or other destination that rejects hard links fails early with no probe residue. This improves diagnosis and avoids wasting a large transfer, but it does not add portable NAS support or weaken the no-overwrite guarantee. Use a supported local staging directory and copy the verified file afterward when the final share cannot pass the probe.
+
 Read retries are process-local, bounded, and limited to safe GET requests. They recover an interrupted list, manifest, or individual chunk while the command remains running; they are not persistent resume after a process exit. Retry waits honor Ctrl+C. A `Retry-After` longer than 30 seconds is reported instead of being retried early or making the CLI wait without a clear bound. The acknowledgement POST is sent once and does not follow redirects.
 
 ## Deployment
