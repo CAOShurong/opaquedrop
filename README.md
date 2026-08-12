@@ -38,44 +38,75 @@ The hosted upload page cannot protect against a server administrator who malicio
 
 ## Quick start
 
-Download the archive for your platform from [GitHub Releases](https://github.com/CAOShurong/opaquedrop/releases), extract it, then initialize a data directory:
+Download the archive for your platform from [GitHub Releases](https://github.com/CAOShurong/opaquedrop/releases) and extract it. Start with a same-computer loopback test; loopback is the only place where OpaqueDrop accepts plain HTTP.
+
+### macOS or Linux
+
+Run these commands from the extracted archive directory (or remove `./` after putting `opaquedrop` on `PATH`):
 
 ```console
-opaquedrop init --data ./opaquedrop-data
+./opaquedrop init --data ./opaquedrop-data
 ```
 
-Create a 24-hour request. For public use, put OpaqueDrop behind HTTPS; plain HTTP is accepted only for localhost.
+Create a 24-hour request whose printed upload link works on this computer:
 
 ```console
-opaquedrop request create \
+./opaquedrop request create \
   --data ./opaquedrop-data \
-  --base-url https://drop.example.net \
-  --label "Photos for the family archive" \
+  --base-url http://127.0.0.1:8080 \
+  --label "Local encrypted drop" \
   --expires 24h \
   --max-files 20 \
   --max-bytes 8GiB \
-  --key-out ./family-photos.key.json \
-  --bundle-out ./family-photos.bundle.json
+  --key-out ./local-drop.key.json \
+  --bundle-out ./local-drop.bundle.json
 ```
 
-Start the service on loopback and let a reverse proxy terminate TLS:
+Start the service on loopback:
 
 ```console
-opaquedrop serve \
+./opaquedrop serve \
   --data ./opaquedrop-data \
-  --listen 127.0.0.1:8080 \
-  --trusted-proxy 127.0.0.1/32
+  --listen 127.0.0.1:8080
 ```
 
-`--trusted-proxy` is opt-in and repeatable. It lets the invalid-capability limiter distinguish clients behind only those explicitly trusted proxy addresses. Omit it when clients connect directly; OpaqueDrop ignores `X-Forwarded-For` from every untrusted peer. See the [proxy trust boundary](docs/DEPLOYMENT.md#client-ip-and-rate-limit-boundary).
-
-Share the printed upload link. After files arrive, collect and authenticate them:
+Open the printed upload link on the same computer. After files arrive, collect and authenticate them from a second terminal:
 
 ```console
-opaquedrop collect --key ./family-photos.key.json --list
-opaquedrop collect --key ./family-photos.key.json --out ./received
-opaquedrop collect --key ./family-photos.key.json --out ./received --wait 30m
+./opaquedrop collect --key ./local-drop.key.json --list
+./opaquedrop collect --key ./local-drop.key.json --out ./received
 ```
+
+If collection starts before the sender finishes, use `./opaquedrop collect --key ./local-drop.key.json --out ./received --wait 30m` instead of the second command.
+
+### Windows PowerShell
+
+PowerShell does not search the current directory for executables and does not use `\` for line continuation. Run the extracted `.exe` explicitly; this block is copy-paste runnable:
+
+```powershell
+.\opaquedrop.exe init --data .\opaquedrop-data
+.\opaquedrop.exe request create `
+  --data .\opaquedrop-data `
+  --base-url http://127.0.0.1:8080 `
+  --label "Local encrypted drop" `
+  --expires 24h `
+  --max-files 20 `
+  --max-bytes 8GiB `
+  --key-out .\local-drop.key.json `
+  --bundle-out .\local-drop.bundle.json
+.\opaquedrop.exe serve --data .\opaquedrop-data --listen 127.0.0.1:8080
+```
+
+After files arrive, use a second PowerShell window opened in the same directory:
+
+```powershell
+.\opaquedrop.exe collect --key .\local-drop.key.json --list
+.\opaquedrop.exe collect --key .\local-drop.key.json --out .\received
+```
+
+If collection starts before the sender finishes, use `.\opaquedrop.exe collect --key .\local-drop.key.json --out .\received --wait 30m` instead of the second command.
+
+For access from another computer, configure HTTPS and a reverse proxy first, then create a new request whose `--base-url` is the real public HTTPS origin. `--trusted-proxy` is opt-in and repeatable; use it only for the proxy addresses you operate. OpaqueDrop ignores `X-Forwarded-For` from every untrusted peer. See the [deployment guide](docs/DEPLOYMENT.md) and [proxy trust boundary](docs/DEPLOYMENT.md#client-ip-and-rate-limit-boundary).
 
 `--list` fetches no file chunks. It authenticates and decrypts each pending filename locally, then shows the upload ID, sanitized name, declared size, completion time, and acknowledgement state so the recipient can choose an item with `--upload ID`. Add `--all` to include acknowledged submissions. `--wait` keeps this recipient process open for a bounded period and polls only the authenticated receipt list; it proceeds when the first unacknowledged submission appears, or when every repeated `--upload ID` has completed. The upload page retries a temporarily interrupted setup, chunk, or completion request three times while that page remains open. The collector writes each file to a private temporary file, verifies every AES-GCM tag and the ciphertext receipt, syncs it, atomically publishes it without replacing an existing name, and only then acknowledges collection. A damaged or malicious submission is reported by upload ID but does not block later healthy submissions; any failure still makes the command exit nonzero. Temporary list, manifest, and chunk GET failures retry three times by default, so one interrupted chunk does not restart the current file. Use `--fail-fast` for first-error automation or `--read-retries 0` to disable read retries.
 
