@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-12
+
+### Changed
+
+- Quick start now provides copy-paste runnable macOS/Linux and Windows PowerShell loopback paths before the separate public HTTPS deployment step.
+- Windows release users are told to invoke the extracted `.\opaquedrop.exe` explicitly and use PowerShell-compatible line continuation.
+
 ## [0.9.0] - 2026-08-12
 
 ### Added
