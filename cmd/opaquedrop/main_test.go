@@ -3,12 +3,30 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/CAOShurong/opaquedrop/internal/collector"
 )
+
+func TestReadJSONStripsUTF8BOM(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "key.json")
+	payload := []byte("\uFEFF{\"schema_version\":1}")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := readJSON(path, &got); err != nil {
+		t.Fatalf("readJSON: %v", err)
+	}
+	if got["schema_version"] != float64(1) {
+		t.Fatalf("got %#v", got)
+	}
+}
 
 func TestServeRejectsInvalidTrustedProxyBeforeStartup(t *testing.T) {
 	err := run([]string{"serve", "--trusted-proxy", "not-a-cidr"})
