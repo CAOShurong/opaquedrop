@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"encoding/base64"
@@ -429,6 +430,7 @@ func readJSON(path string, target any) error {
 	if len(b) > 1<<20 {
 		return errors.New("JSON file exceeds 1 MiB")
 	}
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
 	decoder := json.NewDecoder(strings.NewReader(string(b)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

@@ -4,6 +4,10 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Recipient key JSON files that start with a UTF-8 BOM now parse.
+
 ## [0.9.1] - 2026-08-12
 
 ### Changed
